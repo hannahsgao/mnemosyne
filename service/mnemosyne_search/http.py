@@ -7,9 +7,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from .application import SearchApplication
 from .models import SearchRequest
 from .parsing import QuerySyntaxError
-from .service import SearchService
 
 
 MAX_REQUEST_BYTES = 64 * 1024
@@ -34,21 +34,13 @@ def _request_from_json(payload: dict[str, Any]) -> SearchRequest:
     )
 
 
-def handler_for(service: SearchService) -> type[BaseHTTPRequestHandler]:
+def handler_for(service: SearchApplication) -> type[BaseHTTPRequestHandler]:
     class SearchHandler(BaseHTTPRequestHandler):
         server_version = "MnemosyneSearch/1"
 
         def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             if self.path == "/healthz":
-                self._json(
-                    HTTPStatus.OK,
-                    {
-                        "status": "ok",
-                        "corpusVersion": service.artifacts.corpus_version,
-                        "modelVersion": service.artifacts.model_version,
-                        "indexBackend": service.index.backend,
-                    },
-                )
+                self._json(HTTPStatus.OK, service.health())
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
@@ -66,6 +58,9 @@ def handler_for(service: SearchService) -> type[BaseHTTPRequestHandler]:
                 response = service.search(_request_from_json(payload))
             except (json.JSONDecodeError, QuerySyntaxError, TypeError, ValueError) as error:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+                return
+            except RuntimeError as error:
+                self._json(HTTPStatus.BAD_GATEWAY, {"error": str(error)})
                 return
             self._json(HTTPStatus.OK, response)
 
@@ -85,7 +80,7 @@ def handler_for(service: SearchService) -> type[BaseHTTPRequestHandler]:
     return SearchHandler
 
 
-def serve(service: SearchService, host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(service: SearchApplication, host: str = "127.0.0.1", port: int = 8765) -> None:
     server = ThreadingHTTPServer((host, port), handler_for(service))
     try:
         server.serve_forever()

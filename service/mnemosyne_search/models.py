@@ -48,8 +48,9 @@ class MetricJSON(TypedDict):
     id: str
     version: str
     label: str
-    percentile: float
+    percentile: float | None
     unit: str
+    description: NotRequired[str]
 
 
 class BinJSON(TypedDict):
@@ -66,29 +67,30 @@ class BinJSON(TypedDict):
 class PointJSON(TypedDict):
     binKey: str
     value: float
-    share: float
-    lift: float
+    share: float | None
+    lift: float | None
     hitMass: float
     objectCount: int
     clusterCount: int
 
 
 class DiagnosticsJSON(TypedDict):
-    standardizedSeparation: float
-    controlMean: float
-    controlStdDev: float
-    promptTopKJaccard: float
+    standardizedSeparation: float | None
+    controlMean: float | None
+    controlStdDev: float | None
+    promptTopKJaccard: float | None
     reasons: list[str]
 
 
 class SeriesJSON(TypedDict):
     queryId: str
     k: int
-    threshold: float
-    lowSignal: bool
+    threshold: float | None
+    lowSignal: bool | None
     diagnostics: DiagnosticsJSON
     points: list[PointJSON]
     cacheKey: str
+    totalMatches: NotRequired[int]
 
 
 class EvidenceCardJSON(TypedDict):
@@ -104,7 +106,7 @@ class EvidenceCardJSON(TypedDict):
     dateStart: NotRequired[int | None]
     dateEnd: NotRequired[int | None]
     dateQualifier: str
-    rawScore: float
+    rawScore: float | None
     contributionWeight: float
     contributor: bool
     metadataLicense: str

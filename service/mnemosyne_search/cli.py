@@ -8,6 +8,9 @@ from pathlib import Path
 from .artifacts import ArtifactBundle
 from .encoders import FixtureTextEncoder, Siglip2TextEncoder
 from .http import serve
+from .met_artifacts import MetKeywordArtifacts
+from .met_client import HttpMetClient, MET_API_BASE, SEARCH_MODES
+from .met_service import MetKeywordConfig, MetKeywordSearchService
 from .prompting import PromptEnsemble
 from .service import SearchService
 
@@ -18,9 +21,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-faiss", action="store_true")
-    encoder = parser.add_mutually_exclusive_group(required=True)
-    encoder.add_argument("--siglip2", action="store_true", help="load the local SigLIP 2 text tower")
-    encoder.add_argument("--fixture-vectors", type=Path, help="deterministic fixture vector JSON")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--siglip2", action="store_true", help="load the local SigLIP 2 text tower")
+    mode.add_argument("--fixture-vectors", type=Path, help="deterministic fixture vector JSON")
+    mode.add_argument(
+        "--met-keyword",
+        action="store_true",
+        help="use keyless Met catalogue search and local metadata-frequency aggregation",
+    )
+    parser.add_argument("--met-api-base", default=MET_API_BASE)
+    parser.add_argument("--met-search-mode", choices=sorted(SEARCH_MODES), default="broad")
     parser.add_argument(
         "--allow-model-download",
         action="store_true",
@@ -37,25 +47,33 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    artifacts = ArtifactBundle.load(args.artifacts)
-    if args.fixture_vectors:
-        text_encoder = FixtureTextEncoder.from_json(args.fixture_vectors)
-    else:
-        text_encoder = Siglip2TextEncoder(
-            artifacts.model_id,
-            revision=artifacts.model_version,
-            local_files_only=not args.allow_model_download,
+    if args.met_keyword:
+        met_artifacts = MetKeywordArtifacts.load(args.artifacts)
+        service = MetKeywordSearchService(
+            met_artifacts,
+            HttpMetClient(args.met_api_base),
+            config=MetKeywordConfig(search_mode=args.met_search_mode),
         )
-    prompts = PromptEnsemble(
-        version=args.prompt_version,
-        templates=tuple(args.prompt_template) if args.prompt_template else PromptEnsemble().templates,
-    )
-    service = SearchService(
-        artifacts,
-        text_encoder,
-        prompt_ensemble=prompts,
-        prefer_faiss=not args.no_faiss,
-    )
+    else:
+        artifacts = ArtifactBundle.load(args.artifacts)
+        if args.fixture_vectors:
+            text_encoder = FixtureTextEncoder.from_json(args.fixture_vectors)
+        else:
+            text_encoder = Siglip2TextEncoder(
+                artifacts.model_id,
+                revision=artifacts.model_version,
+                local_files_only=not args.allow_model_download,
+            )
+        prompts = PromptEnsemble(
+            version=args.prompt_version,
+            templates=tuple(args.prompt_template) if args.prompt_template else PromptEnsemble().templates,
+        )
+        service = SearchService(
+            artifacts,
+            text_encoder,
+            prompt_ensemble=prompts,
+            prefer_faiss=not args.no_faiss,
+        )
     try:
         serve(service, args.host, args.port)
     except KeyboardInterrupt:

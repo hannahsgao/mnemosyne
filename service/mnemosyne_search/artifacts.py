@@ -22,7 +22,7 @@ def _camel_case(value: str) -> str:
     return re.sub(r"_([a-z])", lambda match: match.group(1).upper(), value)
 
 
-def _load_metadata(path: Path) -> tuple[dict[str, Any], ...]:
+def load_metadata(path: Path) -> tuple[dict[str, Any], ...]:
     if path.suffix == ".json":
         return tuple(json.loads(path.read_text(encoding="utf-8")))
     if path.suffix != ".csv":
@@ -43,7 +43,7 @@ def _load_metadata(path: Path) -> tuple[dict[str, Any], ...]:
     return tuple(records)
 
 
-def _load_denominators(path: Path) -> tuple[np.ndarray, tuple[Bin, ...] | None]:
+def load_denominators(path: Path) -> tuple[np.ndarray, tuple[Bin, ...] | None]:
     if path.suffix == ".json":
         return (
             np.asarray(json.loads(path.read_text(encoding="utf-8")), dtype=np.float64),
@@ -189,7 +189,7 @@ class ArtifactBundle:
             raise ValueError("unsupported or missing artifactSchemaVersion")
 
         files = manifest["files"]
-        metadata = _load_metadata(base / files["metadata"])
+        metadata = load_metadata(base / files["metadata"])
         embedding_path = base / files["embeddings"]
         if embedding_path.suffix == ".npy":
             raw_embeddings = np.load(embedding_path, mmap_mode="r")
@@ -211,7 +211,7 @@ class ArtifactBundle:
             if weight_path.suffix == ".npz"
             else SparseDateWeights.from_json(weight_path)
         )
-        denominators, bins_from_file = _load_denominators(base / files["binDenominators"])
+        denominators, bins_from_file = load_denominators(base / files["binDenominators"])
         bins = (
             tuple(
                 Bin(

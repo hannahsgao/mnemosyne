@@ -106,6 +106,15 @@ class SearchService:
                 "text encoder model id/version must match the offline image-embedding artifact"
             )
 
+    def health(self) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "mode": "embedding",
+            "corpusVersion": self.artifacts.corpus_version,
+            "modelVersion": self.artifacts.model_version,
+            "indexBackend": self.index.backend,
+        }
+
     def search(self, request: SearchRequest) -> SearchResponse:
         terms = parse_query(request.query)
         corpus = self.artifacts.resolve_corpus(request.corpus_view, request.filters)
