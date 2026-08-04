@@ -1,5 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { Artwork, SearchResponse } from "../../../lib/types";
+import { parseConceptQuery, QuerySyntaxError } from "../../../lib/query";
+import { buildRelativeDensityPoints, buildSharedDecadeBins, decadeKey, decadeStart } from "../../../lib/timeline";
+import type {
+  EvidenceArtwork,
+  EvidenceSlices,
+  QueryDescriptor,
+  SearchResponse,
+  SearchSeries,
+} from "../../../lib/types";
 
 type AicArtwork = {
   id: number;
@@ -14,7 +22,13 @@ type AicArtwork = {
 type AicResponse = {
   data: AicArtwork[];
   pagination?: { total?: number };
-  config?: { iiif_url?: string; website_url?: string };
+  config?: { website_url?: string };
+};
+
+type PrototypeQueryResult = {
+  query: QueryDescriptor;
+  artworks: EvidenceArtwork[];
+  totalMatches: number;
 };
 
 const FIELDS = [
@@ -32,56 +46,227 @@ function normalizeArtist(value: string | null) {
   return value.split("\n")[0]?.trim() || "Unknown artist";
 }
 
-export async function GET(request: NextRequest) {
-  const query = request.nextUrl.searchParams.get("q")?.trim().slice(0, 120);
+function emptyEvidenceSlices(): EvidenceSlices {
+  return {
+    strongest: [],
+    representative: [],
+    borderline: [],
+    randomContributors: [],
+    bestNonContributors: [],
+    randomDenominator: [],
+  };
+}
 
-  if (!query) {
-    return NextResponse.json({ error: "Add a search query." }, { status: 400 });
+async function proxySearchService(request: NextRequest, serviceUrl: string, query: string) {
+  let target: URL;
+  try {
+    target = new URL(serviceUrl);
+    if (target.pathname === "/") target.pathname = "/v1/search";
+  } catch {
+    return NextResponse.json(
+      { error: "MNEMOSYNE_SEARCH_SERVICE_URL is not a valid URL." },
+      { status: 500 },
+    );
   }
 
+  try {
+    const response = await fetch(target, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mnemosyne web app",
+      },
+      body: JSON.stringify({
+        query,
+        selectedQueryId: request.nextUrl.searchParams.get("evidenceQueryId"),
+        selectedBinKey: request.nextUrl.searchParams.get("evidenceBinKey"),
+      }),
+      cache: "no-store",
+    });
+    const body = await response.text();
+    return new NextResponse(body, {
+      status: response.status,
+      headers: {
+        "Cache-Control": response.headers.get("cache-control") ?? "no-store",
+        "Content-Type": response.headers.get("content-type") ?? "application/json",
+      },
+    });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error: "The local search service could not be reached.",
+        detail: error instanceof Error ? error.message : "Unknown error",
+      },
+      { status: 502 },
+    );
+  }
+}
+
+async function searchAic(query: QueryDescriptor): Promise<PrototypeQueryResult> {
   const url = new URL("https://api.artic.edu/api/v1/artworks/search");
-  url.searchParams.set("q", query);
+  url.searchParams.set("q", query.label);
   url.searchParams.set("limit", "100");
   url.searchParams.set("fields", FIELDS);
 
+  const response = await fetch(url, {
+    headers: { "User-Agent": "Mnemosyne prototype (research interface)" },
+    next: { revalidate: 60 * 60 * 12 },
+  });
+  if (!response.ok) throw new Error(`Museum API returned ${response.status}`);
+
+  const payload = (await response.json()) as AicResponse;
+  const websiteBase = (payload.config?.website_url ?? "https://www.artic.edu").replace(
+    "http://",
+    "https://",
+  );
+
+  const artworks = payload.data
+    .filter((work) => work.date_start && work.date_start >= 1000 && work.date_start <= 2030)
+    .map<EvidenceArtwork>((work) => ({
+      artworkId: `aic:${work.id}`,
+      physicalObjectId: `aic:${work.id}`,
+      visualClusterId: `aic:${work.id}`,
+      institution: "Art Institute of Chicago",
+      title: work.title,
+      artist: normalizeArtist(work.artist_display),
+      dateDisplay: work.date_display ?? String(work.date_start),
+      dateStart: work.date_start,
+      dateEnd: work.date_start,
+      dateQualifier: "catalogue display date",
+      imageUrl: work.image_id ? `/api/image/${work.image_id}` : null,
+      sourceRecordUrl: `${websiteBase}/artworks/${work.id}`,
+      metadataLicense: "CC0 metadata",
+      imageRightsUri: "",
+      creditLine: "",
+      publicDomain: work.is_public_domain,
+      rawScore: null,
+      contributionWeight: 1,
+      contributor: true,
+    }));
+
+  return {
+    query,
+    artworks,
+    totalMatches: payload.pagination?.total ?? artworks.length,
+  };
+}
+
+function buildPrototypeResponse(
+  results: PrototypeQueryResult[],
+  evidenceQueryId: string | null,
+  evidenceBinKey: string | null,
+): SearchResponse {
+  const bins = buildSharedDecadeBins(
+    results.flatMap((result) => result.artworks.map((artwork) => artwork.dateStart)),
+  );
+  const series: SearchSeries[] = results.map((result) => ({
+    queryId: result.query.id,
+    k: result.artworks.length,
+    threshold: null,
+    lowSignal: null,
+    diagnostics: {
+      standardizedSeparation: null,
+      controlMean: null,
+      controlStdDev: null,
+      promptTopKJaccard: null,
+      reasons: ["This line reflects a live catalogue metadata sample, not embedding retrieval."],
+    },
+    points: buildRelativeDensityPoints(
+      bins,
+      result.artworks.map((artwork) => artwork.dateStart),
+    ),
+    totalMatches: result.totalMatches,
+  }));
+
+  const selectedSeries =
+    series.find((candidate) => candidate.queryId === evidenceQueryId) ?? series[0] ?? null;
+  const selectedBin =
+    (evidenceBinKey && bins.some((bin) => bin.key === evidenceBinKey)
+      ? evidenceBinKey
+      : selectedSeries?.points.length
+        ? selectedSeries.points.reduce((best, point) =>
+            point.value > best.value ? point : best,
+          ).binKey
+        : null) ?? null;
+
+  let selectedEvidence: SearchResponse["selectedEvidence"] = null;
+  if (selectedSeries && selectedBin) {
+    const source = results.find((result) => result.query.id === selectedSeries.queryId);
+    const slices = emptyEvidenceSlices();
+    slices.strongest = (source?.artworks ?? [])
+      .filter(
+        (artwork) =>
+          artwork.dateStart !== null &&
+          decadeKey(decadeStart(artwork.dateStart)) === selectedBin,
+      )
+      .sort((left, right) => Number(Boolean(right.imageUrl)) - Number(Boolean(left.imageUrl)))
+      .slice(0, 12);
+    selectedEvidence = { queryId: selectedSeries.queryId, binKey: selectedBin, slices };
+  }
+
+  return {
+    schemaVersion: "mnemosyne.search.v1",
+    queries: results.map((result) => result.query),
+    corpus: {
+      id: "aic-live-metadata",
+      version: "v1",
+      label: "Art Institute of Chicago live metadata search",
+      count: null,
+      countingUnit: "physical-object",
+      view: "dated search results",
+      filters: { date: ["1000–2030"] },
+    },
+    model: {
+      id: "aic-catalogue-search",
+      version: "live",
+      promptTemplateVersion: "none",
+    },
+    metric: {
+      id: "prototype-relative-result-density",
+      version: "1",
+      label: "Relative result density",
+      percentile: null,
+      unit: "relative-density",
+      description: "Result count per decade divided by the largest decade count for that query.",
+    },
+    bins,
+    series,
+    selectedEvidence,
+    warnings: [
+      "Prototype mode: lines show the distribution of top catalogue metadata results, not historical prevalence or 1% concentration lift.",
+    ],
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+export async function GET(request: NextRequest) {
+  const input = request.nextUrl.searchParams.get("q") ?? "";
+  let parsed;
   try {
-    const response = await fetch(url, {
-      headers: { "User-Agent": "Mnemosyne prototype (research interface)" },
-      next: { revalidate: 60 * 60 * 12 },
-    });
+    parsed = parseConceptQuery(input);
+  } catch (error) {
+    if (error instanceof QuerySyntaxError) {
+      return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
+    }
+    throw error;
+  }
 
-    if (!response.ok) throw new Error(`Museum API returned ${response.status}`);
+  const serviceUrl = process.env.MNEMOSYNE_SEARCH_SERVICE_URL?.trim();
+  if (serviceUrl) return proxySearchService(request, serviceUrl, input);
 
-    const payload = (await response.json()) as AicResponse;
-    const iiifBase = payload.config?.iiif_url ?? "https://www.artic.edu/iiif/2";
-    const websiteBase = (payload.config?.website_url ?? "https://www.artic.edu").replace(
-      "http://",
-      "https://",
+  const queries: QueryDescriptor[] = parsed.map((query, index) => ({
+    id: `q-${index + 1}`,
+    ...query,
+  }));
+
+  try {
+    const results = await Promise.all(queries.map(searchAic));
+    const body = buildPrototypeResponse(
+      results,
+      request.nextUrl.searchParams.get("evidenceQueryId"),
+      request.nextUrl.searchParams.get("evidenceBinKey"),
     );
-
-    const artworks: Artwork[] = payload.data
-      .filter((work) => work.date_start && work.date_start >= 1000 && work.date_start <= 2030)
-      .map((work) => ({
-        id: work.id,
-        title: work.title,
-        artist: normalizeArtist(work.artist_display),
-        dateLabel: work.date_display ?? String(work.date_start),
-        year: work.date_start,
-        imageUrl: work.image_id
-          ? `${iiifBase}/${work.image_id}/full/600,/0/default.jpg`
-          : null,
-        sourceUrl: `${websiteBase}/artworks/${work.id}`,
-        publicDomain: work.is_public_domain,
-      }));
-
-    const body: SearchResponse = {
-      query,
-      source: "Art Institute of Chicago public API",
-      retrieved: artworks.length,
-      totalMatches: payload.pagination?.total ?? artworks.length,
-      artworks,
-      generatedAt: new Date().toISOString(),
-    };
 
     return NextResponse.json(body, {
       headers: { "Cache-Control": "public, s-maxage=43200, stale-while-revalidate=86400" },

@@ -1,228 +1,338 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Timeline } from "../components/Timeline";
-import type { Artwork, DecadePoint, SearchResponse } from "../lib/types";
+import { MAX_QUERY_LENGTH, parseConceptQuery, QuerySyntaxError } from "../lib/query";
+import { peakSelection, pointForBin } from "../lib/timeline";
+import type {
+  ChartSelection,
+  EvidenceArtwork,
+  EvidenceSliceName,
+  SearchResponse,
+} from "../lib/types";
 
-const EXAMPLE_QUERIES = ["horse", "mother and child", "loneliness"];
+const INITIAL_QUERY = "horse, ship";
+const EXAMPLE_QUERIES = ["horse, ship", '"still life, fruit", flowers', "loneliness, joy"];
+const MAX_VISIBLE_WORKS = 5;
+const EVIDENCE_ORDER: EvidenceSliceName[] = [
+  "strongest",
+  "representative",
+  "borderline",
+  "randomContributors",
+  "bestNonContributors",
+  "randomDenominator",
+];
 
-function decadeFor(work: Artwork) {
-  return work.year === null ? null : Math.floor(work.year / 10) * 10;
-}
+const EVIDENCE_LABELS: Record<EvidenceSliceName, string> = {
+  strongest: "Strong match",
+  representative: "Representative",
+  borderline: "Near threshold",
+  randomContributors: "Contributing sample",
+  bestNonContributors: "Best available match",
+  randomDenominator: "Corpus sample",
+};
 
-function buildTimeline(artworks: Artwork[]): DecadePoint[] {
-  const counts = new Map<number, number>();
-  for (const work of artworks) {
-    const decade = decadeFor(work);
-    if (decade !== null) counts.set(decade, (counts.get(decade) ?? 0) + 1);
-  }
-
-  const populated = [...counts.keys()].sort((a, b) => a - b);
-  if (!populated.length) return [];
-
-  const start = populated[0];
-  const end = populated[populated.length - 1];
-  const maxCount = Math.max(...counts.values());
-  const points: DecadePoint[] = [];
-
-  for (let decade = start; decade <= end; decade += 10) {
-    const count = counts.get(decade) ?? 0;
-    points.push({ decade, count, value: count / maxCount });
-  }
-  return points;
-}
-
-function ArtworkCard({ artwork, index }: { artwork: Artwork; index: number }) {
+function isSearchResponse(value: unknown): value is SearchResponse {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<SearchResponse>;
   return (
-    <a className="artwork-card" href={artwork.sourceUrl} target="_blank" rel="noreferrer">
+    candidate.schemaVersion === "mnemosyne.search.v1" &&
+    Array.isArray(candidate.queries) &&
+    Array.isArray(candidate.bins) &&
+    Array.isArray(candidate.series) &&
+    Boolean(candidate.corpus) &&
+    Boolean(candidate.metric)
+  );
+}
+
+function selectedEvidenceItems(response: SearchResponse | null, selection: ChartSelection | null) {
+  if (
+    !response?.selectedEvidence ||
+    !selection ||
+    response.selectedEvidence.queryId !== selection.queryId ||
+    response.selectedEvidence.binKey !== selection.binKey
+  ) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  return EVIDENCE_ORDER.flatMap((slice) =>
+    response.selectedEvidence!.slices[slice].flatMap((artwork) => {
+      if (seen.has(artwork.artworkId)) return [];
+      seen.add(artwork.artworkId);
+      return [{ artwork, slice }];
+    }),
+  );
+}
+
+function ArtworkCard({ artwork, slice }: { artwork: EvidenceArtwork; slice: EvidenceSliceName }) {
+  return (
+    <a className="artwork-card" href={artwork.sourceRecordUrl} target="_blank" rel="noreferrer">
       <div className="artwork-image-wrap">
         {artwork.imageUrl ? (
-          // Museum IIIF images are deliberately rendered directly so the source remains inspectable.
           // eslint-disable-next-line @next/next/no-img-element
           <img className="artwork-image" src={artwork.imageUrl} alt="" loading="lazy" />
         ) : (
-          <div className="image-placeholder">Image unavailable</div>
+          <div className="image-placeholder">No image</div>
         )}
-        <span className="result-rank">{String(index + 1).padStart(2, "0")}</span>
       </div>
       <div className="artwork-copy">
-        <h3>{artwork.title}</h3>
-        <p>{artwork.artist}</p>
-        <div className="artwork-meta">
-          <span>{artwork.dateLabel}</span>
-          <span>{artwork.publicDomain ? "Public domain" : "View rights"} ↗</span>
-        </div>
+        <strong title={artwork.title}>{artwork.title}</strong>
+        <span title={artwork.artist}>{artwork.artist}</span>
+        <small>{artwork.dateDisplay} ↗</small>
+        <em>{EVIDENCE_LABELS[slice]}</em>
       </div>
     </a>
   );
 }
 
+function buildSearchUrl(query: string, selection?: ChartSelection) {
+  const params = new URLSearchParams({ q: query });
+  if (selection) {
+    params.set("evidenceQueryId", selection.queryId);
+    params.set("evidenceBinKey", selection.binKey);
+  }
+  return `/api/search?${params.toString()}`;
+}
+
 export default function Home() {
-  const [input, setInput] = useState("horse");
-  const [query, setQuery] = useState("horse");
+  const [input, setInput] = useState(INITIAL_QUERY);
+  const [submittedQuery, setSubmittedQuery] = useState(INITIAL_QUERY);
   const [result, setResult] = useState<SearchResponse | null>(null);
-  const [selectedDecade, setSelectedDecade] = useState<number | null>(null);
+  const [selection, setSelection] = useState<ChartSelection | null>(null);
+  const [hiddenQueryIds, setHiddenQueryIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+  const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestId = useRef(0);
+  const evidenceRequestId = useRef(0);
 
   async function search(nextQuery: string) {
-    const cleanQuery = nextQuery.trim();
-    if (!cleanQuery) return;
+    try {
+      parseConceptQuery(nextQuery);
+    } catch (caught) {
+      setError(caught instanceof QuerySyntaxError ? caught.message : "Check the query and try again.");
+      return;
+    }
 
-    setInput(cleanQuery);
-    setQuery(cleanQuery);
+    const currentRequest = ++requestId.current;
+    evidenceRequestId.current += 1;
+    setInput(nextQuery.trim());
+    setSubmittedQuery(nextQuery.trim());
     setLoading(true);
+    setEvidenceLoading(false);
     setError(null);
+    setSelection(null);
+    setHiddenQueryIds(new Set());
 
     try {
-      const response = await fetch(`/api/search?q=${encodeURIComponent(cleanQuery)}`);
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? "Search failed.");
-      const nextResult = payload as SearchResponse;
-      const points = buildTimeline(nextResult.artworks);
-      const peak = [...points].sort((a, b) => b.count - a.count)[0];
-      setResult(nextResult);
-      setSelectedDecade(peak?.decade ?? null);
+      const response = await fetch(buildSearchUrl(nextQuery.trim()));
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String(payload.error)
+            : "Search failed.";
+        throw new Error(message);
+      }
+      if (!isSearchResponse(payload)) throw new Error("The search service returned an unsupported response.");
+      if (requestId.current !== currentRequest) return;
+
+      const nextSelection = payload.selectedEvidence
+        ? {
+            queryId: payload.selectedEvidence.queryId,
+            binKey: payload.selectedEvidence.binKey,
+          }
+        : peakSelection(payload);
+      setResult(payload);
+      setSelection(nextSelection);
     } catch (caught) {
+      if (requestId.current !== currentRequest) return;
       setError(caught instanceof Error ? caught.message : "Search failed.");
       setResult(null);
-      setSelectedDecade(null);
+      setSelection(null);
     } finally {
-      setLoading(false);
+      if (requestId.current === currentRequest) setLoading(false);
+    }
+  }
+
+  async function loadEvidence(nextSelection: ChartSelection) {
+    setSelection(nextSelection);
+    if (
+      result?.selectedEvidence?.queryId === nextSelection.queryId &&
+      result.selectedEvidence.binKey === nextSelection.binKey
+    ) {
+      return;
+    }
+
+    const currentRequest = ++evidenceRequestId.current;
+    setEvidenceLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(buildSearchUrl(submittedQuery, nextSelection));
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload
+            ? String(payload.error)
+            : "Evidence could not be loaded.";
+        throw new Error(message);
+      }
+      if (!isSearchResponse(payload)) throw new Error("The search service returned unsupported evidence.");
+      if (evidenceRequestId.current !== currentRequest) return;
+      setResult((current) => (current ? { ...current, selectedEvidence: payload.selectedEvidence } : current));
+    } catch (caught) {
+      if (evidenceRequestId.current !== currentRequest) return;
+      setError(caught instanceof Error ? caught.message : "Evidence could not be loaded.");
+    } finally {
+      if (evidenceRequestId.current === currentRequest) setEvidenceLoading(false);
     }
   }
 
   useEffect(() => {
-    void search("horse");
+    void search(INITIAL_QUERY);
     // The first query is intentional; subsequent searches are user-driven.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const points = useMemo(() => buildTimeline(result?.artworks ?? []), [result]);
-  const selectedWorks = useMemo(
-    () =>
-      (result?.artworks ?? [])
-        .filter((work) => decadeFor(work) === selectedDecade)
-        .sort((a, b) => Number(Boolean(b.imageUrl)) - Number(Boolean(a.imageUrl))),
-    [result, selectedDecade],
+  const selectedItems = useMemo(
+    () => selectedEvidenceItems(result, selection),
+    [result, selection],
   );
+  const selectedQuery = result?.queries.find((query) => query.id === selection?.queryId) ?? null;
+  const selectedBin = result?.bins.find((bin) => bin.key === selection?.binKey) ?? null;
+  const selectedSeries = result?.series.find((series) => series.queryId === selection?.queryId) ?? null;
+  const selectedPoint =
+    selectedSeries && selection ? pointForBin(selectedSeries, selection.binKey) : null;
+  const yearRange = result?.bins.length
+    ? `${result.bins[0].start}–${result.bins[result.bins.length - 1].end}`
+    : "";
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void search(input);
   }
 
+  function activateSeries(queryId: string) {
+    if (!result || hiddenQueryIds.has(queryId)) return;
+    const candidate =
+      selection && result.series.find((series) => series.queryId === queryId)?.points.some(
+        (point) => point.binKey === selection.binKey,
+      )
+        ? { queryId, binKey: selection.binKey }
+        : peakSelection(result, queryId);
+    if (candidate) void loadEvidence(candidate);
+  }
+
+  function toggleSeries(queryId: string) {
+    const nextHidden = new Set(hiddenQueryIds);
+    const isHidden = nextHidden.has(queryId);
+    if (isHidden) nextHidden.delete(queryId);
+    else nextHidden.add(queryId);
+    setHiddenQueryIds(nextHidden);
+
+    if (!isHidden && selection?.queryId === queryId && result) {
+      const replacement = result.queries.find((query) => !nextHidden.has(query.id));
+      const candidate = replacement ? peakSelection(result, replacement.id) : null;
+      if (candidate) void loadEvidence(candidate);
+      else setSelection(null);
+    }
+  }
+
   return (
-    <main>
-      <nav className="topbar">
-        <a className="wordmark" href="#top" aria-label="Mnemosyne home">
-          <span className="mark">M</span>
-          <span>MNEMOSYNE</span>
-        </a>
-        <div className="nav-meta">
-          <span>Visual culture, indexed</span>
-          <a href="#method">Method</a>
-        </div>
-      </nav>
+    <main className="app-shell">
+      <header className="topbar">
+        <a className="wordmark" href="#top" aria-label="Mnemosyne home">Mnemosyne</a>
+        <span>Art through time</span>
+      </header>
 
-      <section className="hero" id="top">
-        <div className="eyebrow"><span /> PROTOTYPE 01 · MUSEUM COLLECTION SEARCH</div>
-        <h1>See an idea move<br />through art history.</h1>
-        <p className="hero-deck">
-          Search a visual concept, follow its trace across time, and open the artworks behind every point.
-        </p>
-
-        <form className="search-form" onSubmit={submit}>
-          <label className="sr-only" htmlFor="concept-search">Search visual culture</label>
-          <input
-            id="concept-search"
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            placeholder="Try ‘horse’, ‘grief’, or ‘blue sky’"
-            maxLength={120}
-          />
-          <button type="submit" disabled={loading}>
-            {loading ? "Searching…" : "Trace concept"}<span aria-hidden>→</span>
-          </button>
-        </form>
-
-        <div className="query-row">
-          <span>Try</span>
-          {EXAMPLE_QUERIES.map((example) => (
-            <button key={example} onClick={() => void search(example)}>{example}</button>
-          ))}
-        </div>
-      </section>
-
-      <section className="workspace" aria-live="polite">
-        <div className="section-heading">
-          <div>
-            <span className="kicker">TEMPORAL TRACE</span>
-            <h2>{loading ? "Reading the collection…" : `“${query}” across time`}</h2>
+      <div className="workspace" id="top">
+        <section className="search-area" aria-labelledby="page-title">
+          <div className="intro">
+            <h1 id="page-title">Trace an idea through art history</h1>
+            <p>Compare up to five visual concepts. Separate lines with commas; quote a literal comma.</p>
           </div>
-          {result && (
-            <div className="result-stats">
-              <span><strong>{result.retrieved}</strong> dated results sampled</span>
-              <span><strong>{result.totalMatches.toLocaleString()}</strong> metadata matches</span>
+
+          <form className="search-form" onSubmit={submit}>
+            <label className="sr-only" htmlFor="concept-search">Compare visual concepts</label>
+            <input
+              id="concept-search"
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              placeholder='horse, ship, "still life, fruit"'
+              maxLength={MAX_QUERY_LENGTH}
+              aria-describedby="query-help"
+            />
+            <button type="submit" disabled={loading}>{loading ? "Searching…" : "Search"}</button>
+          </form>
+
+          <div className="query-row" id="query-help">
+            <span>Try:</span>
+            {EXAMPLE_QUERIES.map((example) => (
+              <button key={example} type="button" onClick={() => void search(example)}>{example}</button>
+            ))}
+          </div>
+        </section>
+
+        <section className="results" aria-live="polite" aria-busy={loading}>
+          <div className="results-heading">
+            <div>
+              <h2>{loading ? "Searching the collection…" : result?.metric.label ?? "Results over time"}</h2>
+              {!loading && yearRange && <span>{yearRange}</span>}
             </div>
+            {result && !loading && (
+              <p>{result.queries.length} line{result.queries.length === 1 ? "" : "s"} · {result.corpus.label}</p>
+            )}
+          </div>
+
+          {error && !result && <div className="message-state">{error} Try another search.</div>}
+          {loading && <div className="chart-skeleton" />}
+          {!loading && result && result.bins.length > 0 && (
+            <Timeline
+              bins={result.bins}
+              series={result.series}
+              queries={result.queries}
+              metric={result.metric}
+              selection={selection}
+              hiddenQueryIds={hiddenQueryIds}
+              onSelect={(nextSelection) => void loadEvidence(nextSelection)}
+              onActivateSeries={activateSeries}
+              onToggleSeries={toggleSeries}
+            />
           )}
-        </div>
+          {!loading && !error && result && !result.bins.length && (
+            <div className="message-state">No dated artworks were found for this search.</div>
+          )}
+        </section>
 
-        {error && <div className="error-state">{error} Try another query or refresh the page.</div>}
-        {loading && <div className="chart-skeleton"><div /><div /><div /></div>}
-        {!loading && !error && points.length > 0 && (
-          <Timeline points={points} selectedDecade={selectedDecade} onSelect={setSelectedDecade} />
-        )}
-        {!loading && !error && !points.length && (
-          <div className="empty-state">No dated artworks were returned for this query.</div>
-        )}
-
-        {selectedDecade !== null && (
-          <div className="evidence">
-            <div className="evidence-heading">
-              <div>
-                <span className="kicker">EVIDENCE TRAIL · {selectedDecade}–{selectedDecade + 9}</span>
-                <h2>Artworks behind this point</h2>
-              </div>
-              <p>{selectedWorks.length} retrieved work{selectedWorks.length === 1 ? "" : "s"} in this decade</p>
-            </div>
-            <div className="artwork-grid">
-              {selectedWorks.map((artwork, index) => (
-                <ArtworkCard key={artwork.id} artwork={artwork} index={index} />
-              ))}
-            </div>
+        <section className="evidence" aria-label="Evidence for the selected chart point">
+          <div className="evidence-heading">
+            <h2>
+              {!selection || !selectedQuery || !selectedBin
+                ? "Select a line and period"
+                : `${selectedQuery.label} · ${selectedBin.label}`}
+            </h2>
+            {selectedPoint && (
+              <p>{selectedPoint.objectCount} contributing work{selectedPoint.objectCount === 1 ? "" : "s"}</p>
+            )}
           </div>
-        )}
-      </section>
 
-      <section className="method" id="method">
-        <div className="method-intro">
-          <span className="kicker">HOW THIS BECOMES THE REAL THING</span>
-          <h2>One interface. A progressively better retrieval engine.</h2>
-          <p>
-            This vertical slice uses museum metadata so the interaction can be tested now. The production engine
-            swaps that retrieval layer for image–text embeddings while preserving the timeline and evidence trail.
-          </p>
-        </div>
-        <div className="architecture" aria-label="High-level system architecture">
-          <div><span>01</span><strong>Museum APIs + dumps</strong><small>Images, dates, rights, provenance</small></div>
-          <i>→</i>
-          <div><span>02</span><strong>Canonical corpus</strong><small>Deduplicate, normalize, date-weight</small></div>
-          <i>→</i>
-          <div><span>03</span><strong>SigLIP 2 index</strong><small>Image embeddings, no fixed labels</small></div>
-          <i>→</i>
-          <div><span>04</span><strong>Trace + evidence</strong><small>Aggregate, compare, inspect works</small></div>
-        </div>
-        <div className="prototype-note">
-          <strong>Important:</strong> the current line is the distribution of the API’s top metadata results, not a
-          historical prevalence claim. It exists to validate the product loop before corpus-scale embedding work.
-        </div>
-      </section>
+          <div className="artwork-grid" aria-busy={evidenceLoading}>
+            {evidenceLoading && <p className="no-works">Loading evidence…</p>}
+            {!evidenceLoading && selectedItems.slice(0, MAX_VISIBLE_WORKS).map(({ artwork, slice }) => (
+              <ArtworkCard key={artwork.artworkId} artwork={artwork} slice={slice} />
+            ))}
+            {!evidenceLoading && selection && selectedItems.length === 0 && !loading && (
+              <p className="no-works">No contributing works in this period. Context samples may be unavailable.</p>
+            )}
+          </div>
+        </section>
 
-      <footer>
-        <span>MNEMOSYNE · A MEMORY OF IMAGES</span>
-        <span>Prototype collection data via the Art Institute of Chicago</span>
-      </footer>
+        <p className="source-note">
+          {error && result ? `${error} · ` : ""}
+          {result?.warnings[0] ?? "Results are relative to the named, versioned corpus."}
+        </p>
+      </div>
     </main>
   );
 }
