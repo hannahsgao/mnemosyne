@@ -6,7 +6,9 @@ import hashlib
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from threading import RLock
 from typing import Callable, Sequence
+from urllib.parse import quote
 
 import numpy as np
 
@@ -64,11 +66,12 @@ class SeriesComputation:
 
 
 def _stable_sample(rows: Sequence[int] | np.ndarray, count: int, salt: str) -> np.ndarray:
-    ranked = sorted(
-        (int(row) for row in rows),
-        key=lambda row: hashlib.sha256(f"{salt}:{row}".encode("utf-8")).digest(),
-    )
-    return np.asarray(ranked[:count], dtype=np.int64)
+    candidates = np.asarray(rows, dtype=np.int64)
+    if count >= len(candidates):
+        return candidates.copy()
+    seed = int.from_bytes(hashlib.sha256(salt.encode("utf-8")).digest()[:16], "big")
+    positions = np.random.default_rng(seed).choice(len(candidates), size=count, replace=False)
+    return candidates[positions]
 
 
 def _jaccard(left: np.ndarray, right: np.ndarray) -> float:
@@ -94,6 +97,10 @@ class SearchService:
         self.encoder = encoder
         self.prompt_ensemble = prompt_ensemble or PromptEnsemble()
         self.config = config or SearchConfig()
+        if encoder.model_id != artifacts.model_id or encoder.model_version != artifacts.model_version:
+            raise ValueError(
+                "text encoder model id/version must match the offline image-embedding artifact"
+            )
         self.index = index or create_exact_index(
             artifacts.embeddings,
             prefer_faiss=prefer_faiss,
@@ -101,10 +108,7 @@ class SearchService:
         )
         self.cache = cache or InMemorySeriesCache()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
-        if encoder.model_id != artifacts.model_id or encoder.model_version != artifacts.model_version:
-            raise ValueError(
-                "text encoder model id/version must match the offline image-embedding artifact"
-            )
+        self._series_lock = RLock()
 
     def health(self) -> dict[str, object]:
         return {
@@ -193,22 +197,49 @@ class SearchService:
         results: list[SeriesComputation | None] = [self.cache.get(key) for key in keys]
         missing_positions = [index for index, result in enumerate(results) if result is None]
         if missing_positions:
-            missing_terms = [terms[index] for index in missing_positions]
-            encoded = self.prompt_ensemble.encode(missing_terms, self.encoder)
-            vectors = np.stack([item.combined for item in encoded]).astype(np.float32)
-            k = max(1, math.ceil(self.config.percentile * len(corpus.row_ids)))
-            hits = self.index.search(vectors, k, eligible_indices=self._index_filter(corpus))
-            for batch_index, original_position in enumerate(missing_positions):
-                result = self._aggregate_one(
-                    missing_terms[batch_index],
-                    encoded[batch_index],
-                    hits.indices[batch_index],
-                    hits.scores[batch_index],
-                    corpus,
-                    keys[original_position],
-                )
-                self.cache.put(keys[original_position], result)
-                results[original_position] = result
+            # Model inference and cache fill are serialized so concurrent cold
+            # requests cannot encode and search the same series repeatedly.
+            with self._series_lock:
+                still_missing: list[int] = []
+                for index in missing_positions:
+                    cached = self.cache.get(keys[index])
+                    if cached is None:
+                        still_missing.append(index)
+                    else:
+                        results[index] = cached
+                missing_positions = still_missing
+                if missing_positions:
+                    missing_terms = [terms[index] for index in missing_positions]
+                    encoded = self.prompt_ensemble.encode(missing_terms, self.encoder)
+                    index_filter = self._index_filter(corpus)
+                    k = max(1, math.ceil(self.config.percentile * len(corpus.row_ids)))
+                    vectors = np.stack([item.combined for item in encoded]).astype(np.float32)
+                    hits = self.index.search(vectors, k, eligible_indices=index_filter)
+
+                    # Search every prompt variant in one index call. Previously
+                    # diagnostics performed three additional full searches per term.
+                    prompt_counts = [len(item.prompt_vectors) for item in encoded]
+                    prompt_vectors = np.stack(
+                        [vector for item in encoded for vector in item.prompt_vectors]
+                    ).astype(np.float32)
+                    prompt_hits = self.index.search(
+                        prompt_vectors, k, eligible_indices=index_filter
+                    ).indices
+                    prompt_offset = 0
+                    for batch_index, original_position in enumerate(missing_positions):
+                        prompt_count = prompt_counts[batch_index]
+                        result = self._aggregate_one(
+                            missing_terms[batch_index],
+                            encoded[batch_index],
+                            hits.indices[batch_index],
+                            hits.scores[batch_index],
+                            prompt_hits[prompt_offset : prompt_offset + prompt_count],
+                            corpus,
+                            keys[original_position],
+                        )
+                        prompt_offset += prompt_count
+                        self.cache.put(keys[original_position], result)
+                        results[original_position] = result
         return [result for result in results if result is not None]
 
     def _cache_key(self, term: QueryTerm, corpus: ResolvedCorpus) -> str:
@@ -235,25 +266,29 @@ class SearchService:
         encoded: EncodedSeries,
         hit_indices: np.ndarray,
         hit_scores: np.ndarray,
+        prompt_hit_indices: np.ndarray,
         corpus: ResolvedCorpus,
         cache_key: str,
     ) -> SeriesComputation:
-        hit_mass = self.artifacts.date_weights.aggregate(hit_indices)
+        weights = self.artifacts.date_weights
+        hit_mass = np.zeros(len(self.artifacts.bins), dtype=np.float64)
+        contributor_rows: list[set[int]] = [set() for _ in self.artifacts.bins]
+        contributor_clusters: list[set[str]] = [set() for _ in self.artifacts.bins]
+        for raw_row in hit_indices:
+            row = int(raw_row)
+            start, end = weights.indptr[row], weights.indptr[row + 1]
+            columns = weights.indices[start:end]
+            np.add.at(hit_mass, columns, weights.data[start:end])
+            cluster = str(self.artifacts.metadata[row].get("visualClusterId") or f"row-{row}")
+            for raw_column in columns:
+                column = int(raw_column)
+                contributor_rows[column].add(row)
+                contributor_clusters[column].add(cluster)
         points: list[PointJSON] = []
-        hit_set = set(map(int, hit_indices))
         for bin_index, bin_item in enumerate(self.artifacts.bins):
             denominator = float(corpus.denominators[bin_index])
             share = float(hit_mass[bin_index] / denominator) if denominator else 0.0
             lift = share / self.config.percentile if denominator else 0.0
-            contributors = [
-                row
-                for row in hit_set
-                if self.artifacts.date_weights.weight(row, bin_index) > 0
-            ]
-            clusters = {
-                self.artifacts.metadata[row].get("visualClusterId") or f"row-{row}"
-                for row in contributors
-            }
             points.append(
                 {
                     "binKey": bin_item.key,
@@ -261,13 +296,13 @@ class SearchService:
                     "share": share,
                     "lift": lift,
                     "hitMass": float(hit_mass[bin_index]),
-                    "objectCount": len(contributors),
-                    "clusterCount": len(clusters),
+                    "objectCount": len(contributor_rows[bin_index]),
+                    "clusterCount": len(contributor_clusters[bin_index]),
                 }
             )
 
         diagnostics, low_signal = self._diagnostics(
-            term, encoded, hit_indices, hit_scores, corpus
+            term, encoded, hit_indices, hit_scores, prompt_hit_indices, corpus
         )
         return SeriesComputation(
             cache_key=cache_key,
@@ -287,11 +322,11 @@ class SearchService:
         encoded: EncodedSeries,
         hit_indices: np.ndarray,
         hit_scores: np.ndarray,
+        prompt_hit_indices: np.ndarray,
         corpus: ResolvedCorpus,
     ) -> tuple[DiagnosticsJSON, bool]:
-        hit_set = set(map(int, hit_indices))
-        non_hits = np.asarray(
-            [int(row) for row in corpus.row_ids if int(row) not in hit_set], dtype=np.int64
+        non_hits = np.setdiff1d(
+            corpus.row_ids, np.unique(hit_indices), assume_unique=True
         )
         controls = _stable_sample(
             non_hits,
@@ -309,14 +344,9 @@ class SearchService:
             control_std = 0.0
             separation = 0.0
 
-        prompt_jaccards: list[float] = []
-        for prompt_vector in encoded.prompt_vectors:
-            prompt_hits = self.index.search(
-                prompt_vector.reshape(1, -1),
-                len(hit_indices),
-                eligible_indices=self._index_filter(corpus),
-            ).indices[0]
-            prompt_jaccards.append(_jaccard(hit_indices, prompt_hits))
+        prompt_jaccards = [
+            _jaccard(hit_indices, prompt_hits) for prompt_hits in prompt_hit_indices
+        ]
         prompt_jaccard = float(np.mean(prompt_jaccards)) if prompt_jaccards else 1.0
         reasons: list[str] = []
         if separation < self.config.minimum_standardized_separation:
@@ -335,17 +365,11 @@ class SearchService:
         )
 
     def _index_filter(self, corpus: ResolvedCorpus) -> np.ndarray | None:
-        all_rows = np.arange(self.artifacts.embeddings.shape[0], dtype=np.int64)
-        return None if np.array_equal(corpus.row_ids, all_rows) else corpus.row_ids
+        return None if corpus.covers_index else corpus.row_ids
 
     def _bin_payload(self, corpus: ResolvedCorpus) -> list[BinJSON]:
         payload: list[BinJSON] = []
         for bin_index, item in enumerate(self.artifacts.bins):
-            rows, _ = self.artifacts.date_weights.rows_for_bin(corpus.row_ids, bin_index)
-            clusters = {
-                self.artifacts.metadata[int(row)].get("visualClusterId") or f"row-{row}"
-                for row in rows
-            }
             denominator = float(corpus.denominators[bin_index])
             payload.append(
                 {
@@ -354,8 +378,8 @@ class SearchService:
                     "start": item.start,
                     "end": item.end,
                     "denominator": denominator,
-                    "objectCount": len(rows),
-                    "clusterCount": len(clusters),
+                    "objectCount": int(corpus.object_counts[bin_index]),
+                    "clusterCount": int(corpus.cluster_counts[bin_index]),
                     "belowMinimumDenominator": denominator < self.config.minimum_denominator,
                 }
             )
@@ -421,12 +445,13 @@ class SearchService:
         if contributor_by_score:
             middle = (len(contributor_by_score) - 1) / 2
             representative = sorted(
-                contributor_by_score,
-                key=lambda row: (
-                    abs(contributor_by_score.index(row) - middle),
-                    int(row),
+                enumerate(contributor_by_score),
+                key=lambda item: (
+                    abs(item[0] - middle),
+                    int(item[1]),
                 ),
             )[:count]
+            representative = [row for _, row in representative]
         else:
             representative = []
         borderline = sorted(
@@ -479,15 +504,21 @@ class SearchService:
         self, row: int, score: float, weight: float, contributor: bool
     ) -> EvidenceCardJSON:
         item = self.artifacts.metadata[row]
+        artwork_id = str(item["artworkId"])
+        local_image = self.artifacts.image_path_for(artwork_id)
         return {
-            "artworkId": str(item["artworkId"]),
+            "artworkId": artwork_id,
             "physicalObjectId": str(item.get("physicalObjectId", item["artworkId"])),
             "visualClusterId": str(item.get("visualClusterId", item["artworkId"])),
             "title": str(item.get("title", "Untitled")),
             "artist": str(item.get("artist", "Unknown artist")),
             "institution": str(item.get("institution", "Unknown institution")),
             "sourceRecordUrl": str(item.get("sourceRecordUrl", "")),
-            "imageUrl": str(item.get("imageUrl", "")),
+            "imageUrl": (
+                f"/v1/images/{quote(artwork_id, safe='')}"
+                if local_image is not None
+                else str(item.get("imageUrl", ""))
+            ),
             "dateDisplay": str(item.get("dateDisplay", "Unknown date")),
             "dateStart": item.get("dateStart"),
             "dateEnd": item.get("dateEnd"),

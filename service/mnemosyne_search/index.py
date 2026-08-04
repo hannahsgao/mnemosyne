@@ -32,28 +32,46 @@ class ExactIndex(Protocol):
 
 class NumpyFlatIPIndex:
     backend = "numpy-flat-ip"
+    block_size = 65_536
 
     def __init__(self, embeddings: np.ndarray) -> None:
-        self.embeddings = l2_normalize(np.asarray(embeddings, dtype=np.float32))
+        # Artifact loading validates normalization. Keeping this as a view
+        # preserves an on-disk memmap instead of duplicating the full matrix.
+        self.embeddings = np.asarray(embeddings, dtype=np.float32)
+        if self.embeddings.ndim != 2:
+            raise ValueError("embeddings must be a matrix")
 
     def search(
         self, queries: np.ndarray, k: int, *, eligible_indices: np.ndarray | None = None
     ) -> SearchHits:
         query_rows = l2_normalize(queries)
-        candidates = (
-            np.arange(self.embeddings.shape[0], dtype=np.int64)
-            if eligible_indices is None
-            else np.asarray(eligible_indices, dtype=np.int64)
+        candidate_count = (
+            self.embeddings.shape[0] if eligible_indices is None else len(eligible_indices)
         )
-        if not 1 <= k <= len(candidates):
+        if not 1 <= k <= candidate_count:
             raise ValueError("k must be between one and the eligible corpus size")
-        scores = query_rows @ self.embeddings[candidates].T
-        # Stable sort preserves ascending corpus row as the deterministic tie-break.
-        order = np.argsort(-scores, axis=1, kind="stable")[:, :k]
-        return SearchHits(
-            indices=candidates[order],
-            scores=np.take_along_axis(scores, order, axis=1).astype(np.float32),
-        )
+        eligible = None if eligible_indices is None else np.asarray(eligible_indices, dtype=np.int64)
+        best_indices = np.empty((len(query_rows), 0), dtype=np.int64)
+        best_scores = np.empty((len(query_rows), 0), dtype=np.float32)
+        for start in range(0, candidate_count, self.block_size):
+            end = min(candidate_count, start + self.block_size)
+            if eligible is None:
+                block_indices = np.arange(start, end, dtype=np.int64)
+                block_embeddings = self.embeddings[start:end]
+            else:
+                block_indices = eligible[start:end]
+                # Advanced indexing is bounded to one block instead of copying
+                # the entire filtered corpus into memory.
+                block_embeddings = self.embeddings[block_indices]
+            block_scores = (query_rows @ block_embeddings.T).astype(np.float32, copy=False)
+            combined_indices = np.concatenate(
+                (best_indices, np.broadcast_to(block_indices, block_scores.shape)), axis=1
+            )
+            combined_scores = np.concatenate((best_scores, block_scores), axis=1)
+            order = np.argsort(-combined_scores, axis=1, kind="stable")[:, :k]
+            best_indices = np.take_along_axis(combined_indices, order, axis=1)
+            best_scores = np.take_along_axis(combined_scores, order, axis=1)
+        return SearchHits(indices=best_indices, scores=best_scores)
 
     def score(self, query: np.ndarray, indices: np.ndarray) -> np.ndarray:
         vector = l2_normalize(np.asarray(query, dtype=np.float32).reshape(1, -1))[0]
@@ -69,7 +87,9 @@ class FaissFlatIPIndex:
         except ImportError as error:  # pragma: no cover - optional production dependency
             raise RuntimeError("FAISS is not installed") from error
         self._faiss = faiss
-        self.embeddings = l2_normalize(np.asarray(embeddings, dtype=np.float32))
+        self.embeddings = np.asarray(embeddings, dtype=np.float32)
+        if self.embeddings.ndim != 2:
+            raise ValueError("embeddings must be a matrix")
         if index_path is None:
             self._index = faiss.IndexFlatIP(self.embeddings.shape[1])
             self._index.add(np.ascontiguousarray(self.embeddings))

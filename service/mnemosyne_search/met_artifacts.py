@@ -9,7 +9,14 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from .artifacts import Bin, ResolvedCorpus, SparseDateWeights, load_denominators, load_metadata
+from .artifacts import (
+    Bin,
+    ResolvedCorpus,
+    SparseDateWeights,
+    load_bin_counts,
+    load_denominators,
+    load_metadata,
+)
 
 
 MET_CORPUS_SCHEMA_VERSION = "mnemosyne-corpus-build/v1"
@@ -27,6 +34,9 @@ class MetKeywordArtifacts:
     bins: tuple[Bin, ...]
     date_weights: SparseDateWeights
     default_denominators: np.ndarray
+    default_object_counts: np.ndarray
+    default_cluster_counts: np.ndarray
+    cluster_ids: tuple[str, ...]
     source_id_to_row: Mapping[int, int]
     allowed_filter_fields: frozenset[str]
 
@@ -50,7 +60,9 @@ class MetKeywordArtifacts:
             if weight_path.suffix == ".npz"
             else SparseDateWeights.from_json(weight_path)
         )
-        denominators, bins_from_file = load_denominators(base / files["binDenominators"])
+        denominator_path = base / files["binDenominators"]
+        denominators, bins_from_file = load_denominators(denominator_path)
+        bin_counts = load_bin_counts(denominator_path)
         bins = tuple(
             Bin(
                 key=item["key"],
@@ -71,6 +83,20 @@ class MetKeywordArtifacts:
             raise ValueError("Met denominators do not match date weights")
         if len(weights.dated_rows()) != len(metadata):
             raise ValueError("Met keyword corpus must contain only dated artworks")
+        cluster_ids = tuple(
+            str(record.get("visualClusterId") or f"row-{index}")
+            for index, record in enumerate(metadata)
+        )
+        default_object_counts, default_cluster_counts = (
+            bin_counts
+            if bin_counts is not None
+            else weights.membership_counts(weights.dated_rows(), cluster_ids)
+        )
+        if (
+            default_object_counts.shape != (len(bins),)
+            or default_cluster_counts.shape != (len(bins),)
+        ):
+            raise ValueError("Met precomputed bin counts have inconsistent dimensions")
 
         source_id_to_row: dict[int, int] = {}
         for index, record in enumerate(metadata):
@@ -93,6 +119,9 @@ class MetKeywordArtifacts:
             bins=tuple(bins),
             date_weights=weights,
             default_denominators=denominators,
+            default_object_counts=default_object_counts,
+            default_cluster_counts=default_cluster_counts,
+            cluster_ids=cluster_ids,
             source_id_to_row=source_id_to_row,
             allowed_filter_fields=frozenset(
                 manifest.get(
@@ -143,9 +172,20 @@ class MetKeywordArtifacts:
             if not normalized_filters
             else self.date_weights.aggregate(row_ids)
         )
+        row_ids = np.asarray(row_ids, dtype=np.int64)
+        if not normalized_filters:
+            object_counts = self.default_object_counts.copy()
+            cluster_counts = self.default_cluster_counts.copy()
+        else:
+            object_counts, cluster_counts = self.date_weights.membership_counts(
+                row_ids, self.cluster_ids
+            )
         return ResolvedCorpus(
             view="all",
             filters=normalized_filters,
-            row_ids=np.asarray(row_ids, dtype=np.int64),
+            row_ids=row_ids,
             denominators=denominators,
+            object_counts=object_counts,
+            cluster_counts=cluster_counts,
+            covers_index=len(row_ids) == len(self.metadata),
         )

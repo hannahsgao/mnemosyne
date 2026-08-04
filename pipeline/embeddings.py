@@ -153,20 +153,26 @@ class Siglip2LocalEncoder:
         except ImportError as exc:
             raise CorpusBuildError("SigLIP 2 encoding requires NumPy and Pillow") from exc
 
-        batches = []
+        output = np.empty((len(records), self.dimension), dtype=np.float32)
         for offset in range(0, len(records), batch_size):
             images = []
-            for record in records[offset : offset + batch_size]:
-                image_path = _resolve_image_path(record, image_root)
-                _verify_image_hash(image_path, record.get("image_sha256", ""))
-                with Image.open(image_path) as opened:
-                    images.append(opened.convert("RGB"))
-            inputs = self._processor(images=images, return_tensors="pt")
-            inputs = {name: tensor.to(self._device) for name, tensor in inputs.items()}
-            with self._torch.inference_mode():
-                features = self._model.get_image_features(**inputs)
-            batches.append(features.detach().cpu().to(self._torch.float32).numpy())
-        return np.concatenate(batches, axis=0) if batches else np.empty((0, self.dimension), dtype=np.float32)
+            try:
+                for record in records[offset : offset + batch_size]:
+                    image_path = _resolve_image_path(record, image_root)
+                    # The build has already verified every input hash while
+                    # constructing embedded-images.manifest.csv.
+                    with Image.open(image_path) as opened:
+                        images.append(opened.convert("RGB"))
+                inputs = self._processor(images=images, return_tensors="pt")
+                inputs = {name: tensor.to(self._device) for name, tensor in inputs.items()}
+                with self._torch.inference_mode():
+                    features = self._model.get_image_features(**inputs)
+                batch = features.detach().cpu().to(self._torch.float32).numpy()
+                output[offset : offset + len(batch)] = batch
+            finally:
+                for image in images:
+                    image.close()
+        return output
 
     def settings(self) -> Mapping[str, object]:
         return {
@@ -253,7 +259,8 @@ def _normalize(matrix):
         raise CorpusBuildError("encoder returned non-finite values")
     if np.any(norms == 0):
         raise CorpusBuildError("encoder returned a zero vector")
-    return values / norms
+    np.divide(values, norms, out=values)
+    return values
 
 
 def _artifact(root: Path, path: Path) -> dict[str, object]:
@@ -371,7 +378,9 @@ def build_embedding_index(
         embedded_images_path = staging / "embedded-images.manifest.csv"
         _write_csv(embedded_images_path, embedded_image_rows)
 
-        storage_matrix = matrix.astype(np.float16 if dtype == "float16" else np.float32)
+        storage_matrix = matrix.astype(
+            np.float16 if dtype == "float16" else np.float32, copy=False
+        )
         raw_path = staging / f"embeddings.{dtype.replace('float', 'f')}"
         storage_matrix.tofile(raw_path)
         npy_path = staging / "embeddings.npy"
@@ -379,7 +388,7 @@ def build_embedding_index(
         fallback_path = staging / "index-flat-ip.npz"
         np.savez_compressed(
             fallback_path,
-            embeddings=matrix.astype(np.float32),
+            embeddings=matrix.astype(np.float32, copy=False),
             artwork_ids=np.asarray([record["artwork_id"] for record in records]),
         )
 
@@ -391,7 +400,7 @@ def build_embedding_index(
             wrote_faiss = False
         else:
             index = faiss.IndexFlatIP(encoder.dimension)
-            index.add(matrix.astype(np.float32))
+            index.add(np.ascontiguousarray(matrix, dtype=np.float32))
             faiss.write_index(index, str(faiss_path))
             wrote_faiss = True
             index_backend = "faiss-index-flat-ip"

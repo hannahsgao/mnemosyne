@@ -8,10 +8,25 @@ from pathlib import Path
 
 import numpy as np
 
-from mnemosyne_search.artifacts import ArtifactBundle
+from mnemosyne_search.artifacts import ArtifactBundle, SparseDateWeights
 
 
 class PipelineArtifactContractTests(unittest.TestCase):
+    def test_sparse_membership_counts_rows_and_distinct_clusters_in_one_pass(self) -> None:
+        weights = SparseDateWeights(
+            indptr=np.asarray([0, 2, 3], dtype=np.int64),
+            indices=np.asarray([0, 1, 1], dtype=np.int64),
+            data=np.asarray([0.5, 0.5, 1.0], dtype=np.float64),
+            shape=(2, 2),
+        ).validated()
+
+        objects, clusters = weights.membership_counts(
+            np.asarray([0, 1], dtype=np.int64), ("shared-cluster", "shared-cluster")
+        )
+
+        np.testing.assert_array_equal(objects, [1, 2])
+        np.testing.assert_array_equal(clusters, [1, 1])
+
     def test_loads_pipeline_model_manifest_csv_and_scipy_csr_layout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

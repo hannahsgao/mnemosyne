@@ -155,7 +155,7 @@ class MetKeywordSearchTests(unittest.TestCase):
                 selected_bin_key="1880:1889",
             )
         )
-        cards = response["selectedEvidence"]["slices"]["strongest"]
+        cards = response["selectedEvidence"]["slices"]["randomContributors"]
         self.assertEqual({card["artworkId"] for card in cards}, {"MET_10", "MET_11"})
         self.assertTrue(all(card["imageUrl"] for card in cards))
         self.assertTrue(all(card["rawScore"] is None for card in cards))
@@ -177,7 +177,7 @@ class MetKeywordSearchTests(unittest.TestCase):
         response = self.service.search(SearchRequest(query="none"))
         self.assertTrue(all(point["value"] == 0 for point in response["series"][0]["points"]))
         self.assertTrue(any("No eligible corpus matches" in warning for warning in response["warnings"]))
-        self.assertEqual(response["selectedEvidence"]["slices"]["strongest"], [])
+        self.assertEqual(response["selectedEvidence"]["slices"]["randomContributors"], [])
 
 
 if __name__ == "__main__":

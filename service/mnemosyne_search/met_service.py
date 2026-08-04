@@ -58,10 +58,12 @@ class MetSeriesComputation:
 
 
 def _stable_sample(rows: Sequence[int] | np.ndarray, count: int, salt: str) -> list[int]:
-    return sorted(
-        (int(row) for row in rows),
-        key=lambda row: hashlib.sha256(f"{salt}:{row}".encode()).digest(),
-    )[:count]
+    candidates = np.asarray(rows, dtype=np.int64)
+    if count >= len(candidates):
+        return candidates.tolist()
+    seed = int.from_bytes(hashlib.sha256(salt.encode("utf-8")).digest()[:16], "big")
+    positions = np.random.default_rng(seed).choice(len(candidates), size=count, replace=False)
+    return candidates[positions].tolist()
 
 
 class MetKeywordSearchService:
@@ -93,7 +95,8 @@ class MetKeywordSearchService:
     def search(self, request: SearchRequest) -> SearchResponse:
         terms = parse_query(request.query)
         corpus = self.artifacts.resolve_corpus(request.corpus_view, request.filters)
-        computations = [self._series(term, corpus) for term in terms]
+        eligible_rows = frozenset(map(int, corpus.row_ids))
+        computations = [self._series(term, corpus, eligible_rows) for term in terms]
 
         selected_index = 0
         if request.selected_query_id is not None:
@@ -158,7 +161,12 @@ class MetKeywordSearchService:
             "generatedAt": self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
 
-    def _series(self, term: QueryTerm, corpus: ResolvedCorpus) -> MetSeriesComputation:
+    def _series(
+        self,
+        term: QueryTerm,
+        corpus: ResolvedCorpus,
+        eligible_rows: frozenset[int],
+    ) -> MetSeriesComputation:
         key = series_cache_key(
             {
                 "query": term.normalized,
@@ -177,28 +185,25 @@ class MetKeywordSearchService:
             return cached
 
         object_ids = self.client.search(term.normalized, self.config.search_mode)
-        eligible = set(map(int, corpus.row_ids))
         rows = np.asarray(
             sorted(
                 {
-                row
-                for object_id in object_ids
-                if (row := self.artifacts.source_id_to_row.get(object_id)) is not None
-                and row in eligible
+                    row
+                    for object_id in object_ids
+                    if (row := self.artifacts.source_id_to_row.get(object_id)) is not None
+                    and row in eligible_rows
                 }
             ),
             dtype=np.int64,
         )
         hit_mass = self.artifacts.date_weights.aggregate(rows)
+        object_counts, cluster_counts = self.artifacts.date_weights.membership_counts(
+            rows, self.artifacts.cluster_ids
+        )
         points: list[PointJSON] = []
         for bin_index, bin_item in enumerate(self.artifacts.bins):
             denominator = float(corpus.denominators[bin_index])
             share = float(hit_mass[bin_index] / denominator) if denominator else 0.0
-            contributors, _ = self.artifacts.date_weights.rows_for_bin(rows, bin_index)
-            clusters = {
-                self.artifacts.metadata[int(row)].get("visualClusterId") or f"row-{int(row)}"
-                for row in contributors
-            }
             points.append(
                 {
                     "binKey": bin_item.key,
@@ -206,8 +211,8 @@ class MetKeywordSearchService:
                     "share": share,
                     "lift": None,
                     "hitMass": float(hit_mass[bin_index]),
-                    "objectCount": len(contributors),
-                    "clusterCount": len(clusters),
+                    "objectCount": int(object_counts[bin_index]),
+                    "clusterCount": int(cluster_counts[bin_index]),
                 }
             )
         computation = MetSeriesComputation(
@@ -222,11 +227,6 @@ class MetKeywordSearchService:
     def _bin_payload(self, corpus: ResolvedCorpus) -> list[BinJSON]:
         payload: list[BinJSON] = []
         for index, item in enumerate(self.artifacts.bins):
-            rows, _ = self.artifacts.date_weights.rows_for_bin(corpus.row_ids, index)
-            clusters = {
-                self.artifacts.metadata[int(row)].get("visualClusterId") or f"row-{int(row)}"
-                for row in rows
-            }
             denominator = float(corpus.denominators[index])
             payload.append(
                 {
@@ -235,8 +235,8 @@ class MetKeywordSearchService:
                     "start": item.start,
                     "end": item.end,
                     "denominator": denominator,
-                    "objectCount": len(rows),
-                    "clusterCount": len(clusters),
+                    "objectCount": int(corpus.object_counts[index]),
+                    "clusterCount": int(corpus.cluster_counts[index]),
                     "belowMinimumDenominator": denominator < self.config.minimum_denominator,
                 }
             )
@@ -303,10 +303,10 @@ class MetKeywordSearchService:
         )
         cards = [self._evidence_card(row, bin_index) for row in selected]
         slices: EvidenceSlicesJSON = {
-            "strongest": cards,
+            "strongest": [],
             "representative": [],
             "borderline": [],
-            "randomContributors": [],
+            "randomContributors": cards,
             "bestNonContributors": [],
             "randomDenominator": [],
         }

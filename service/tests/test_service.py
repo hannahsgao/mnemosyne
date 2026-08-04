@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mnemosyne_search.artifacts import ArtifactBundle
+from mnemosyne_search.cache import InMemorySeriesCache
 from mnemosyne_search.encoders import FixtureTextEncoder
 from mnemosyne_search.models import SearchRequest
 from mnemosyne_search.prompting import PromptEnsemble
@@ -62,6 +63,22 @@ class SearchServiceTests(unittest.TestCase):
         self.service.search(SearchRequest(query="horse, ship"))
         self.service.search(SearchRequest(query="horse, train"))
         self.assertEqual(self.encoder.calls, [["horse", "ship"], ["train"]])
+
+    def test_multi_series_response_survives_cache_smaller_than_query_count(self) -> None:
+        service = SearchService(
+            self.artifacts,
+            self.encoder,
+            prompt_ensemble=PromptEnsemble(version="fixture-prompts-v1", templates=("{query}",)),
+            prefer_faiss=False,
+            cache=InMemorySeriesCache(max_entries=1),
+        )
+
+        response = service.search(SearchRequest(query="horse, ship"))
+
+        self.assertEqual(
+            [series["queryId"] for series in response["series"]],
+            [response["queries"][0]["id"], response["queries"][1]["id"]],
+        )
 
     def test_selects_requested_series_and_bin_for_evidence(self) -> None:
         parsed = self.service.search(SearchRequest(query="horse, train"))
