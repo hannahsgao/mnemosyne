@@ -20,7 +20,10 @@ MAX_QUERY_LENGTH = 500
 def normalize_term(value: str) -> str:
     """Normalize only for identity/cache use; preserve the user's display label."""
 
-    return _SPACE_RE.sub(" ", unicodedata.normalize("NFKC", value).strip()).casefold()
+    # Match JavaScript's locale-insensitive lowercase behavior. Full Unicode
+    # case-folding (for example Straße -> strasse) made frontend and backend
+    # disagree about which terms were duplicates.
+    return _SPACE_RE.sub(" ", unicodedata.normalize("NFKC", value).strip()).lower()
 
 
 def parse_query(raw: str, *, max_series: int = 5) -> list[QueryTerm]:

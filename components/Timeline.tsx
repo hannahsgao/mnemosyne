@@ -40,7 +40,10 @@ const PAD_BOTTOM = 34;
 
 function formatValue(value: number, metric: MetricMetadata) {
   if (metric.unit === "lift") return `${value.toFixed(value < 10 ? 2 : 1)}×`;
-  return `${Math.round(value * 100)}%`;
+  if (metric.unit === "relative-density") return `${Math.round(value * 100)}%`;
+  const percentage = value * 100;
+  const digits = percentage >= 10 ? 1 : percentage >= 1 ? 2 : percentage >= 0.01 ? 3 : 4;
+  return `${percentage.toFixed(digits).replace(/\.?0+$/, "")}%`;
 }
 
 export function Timeline({
@@ -73,7 +76,12 @@ export function Timeline({
     metric.unit === "lift" ? 1 : 0,
     ...visibleSeries.flatMap((item) => item.points.map((point) => point.value)),
   );
-  const yMax = metric.unit === "lift" ? Math.max(1.25, largestValue * 1.12) : 1;
+  const yMax =
+    metric.unit === "lift"
+      ? Math.max(1.25, largestValue * 1.12)
+      : metric.unit === "frequency" && largestValue > 0
+        ? largestValue * 1.12
+        : 1;
   const y = (value: number) => PAD_TOP + chartHeight - (Math.max(0, value) / yMax) * chartHeight;
   const yTicks = [0, 0.25, 0.5, 0.75, 1].map((tick) => tick * yMax);
   const labelEvery = Math.max(1, Math.ceil(bins.length / 7));

@@ -25,7 +25,7 @@ export type MetricMetadata = {
   version: string;
   label: string;
   percentile: number | null;
-  unit: "lift" | "relative-density";
+  unit: "lift" | "relative-density" | "frequency";
   description?: string;
 };
 

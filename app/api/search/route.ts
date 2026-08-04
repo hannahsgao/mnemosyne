@@ -40,6 +40,33 @@ const FIELDS = [
   "image_id",
   "is_public_domain",
 ].join(",");
+const UPSTREAM_TIMEOUT_MS = 15_000;
+
+function rewriteBackendImageUrls(payload: unknown) {
+  if (!payload || typeof payload !== "object") return payload;
+  const selected = (payload as { selectedEvidence?: unknown }).selectedEvidence;
+  if (!selected || typeof selected !== "object") return payload;
+  const slices = (selected as { slices?: unknown }).slices;
+  if (!slices || typeof slices !== "object") return payload;
+
+  for (const items of Object.values(slices)) {
+    if (!Array.isArray(items)) continue;
+    for (const item of items) {
+      if (!item || typeof item !== "object") continue;
+      const artwork = item as { imageUrl?: unknown };
+      if (typeof artwork.imageUrl !== "string" || !artwork.imageUrl.startsWith("/v1/images/")) {
+        continue;
+      }
+      try {
+        const artworkId = decodeURIComponent(artwork.imageUrl.slice("/v1/images/".length));
+        artwork.imageUrl = `/api/backend-image?${new URLSearchParams({ id: artworkId })}`;
+      } catch {
+        artwork.imageUrl = "";
+      }
+    }
+  }
+  return payload;
+}
 
 function normalizeArtist(value: string | null) {
   if (!value) return "Unknown artist";
@@ -83,14 +110,19 @@ async function proxySearchService(request: NextRequest, serviceUrl: string, quer
         selectedBinKey: request.nextUrl.searchParams.get("evidenceBinKey"),
       }),
       cache: "no-store",
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
-    const body = await response.text();
-    return new NextResponse(body, {
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const body: unknown = await response.json();
+      return NextResponse.json(rewriteBackendImageUrls(body), {
+        status: response.status,
+        headers: { "Cache-Control": response.headers.get("cache-control") ?? "no-store" },
+      });
+    }
+    return new NextResponse(await response.text(), {
       status: response.status,
-      headers: {
-        "Cache-Control": response.headers.get("cache-control") ?? "no-store",
-        "Content-Type": response.headers.get("content-type") ?? "application/json",
-      },
+      headers: { "Cache-Control": "no-store", "Content-Type": contentType || "text/plain" },
     });
   } catch (error) {
     return NextResponse.json(
@@ -112,6 +144,7 @@ async function searchAic(query: QueryDescriptor): Promise<PrototypeQueryResult> 
   const response = await fetch(url, {
     headers: { "User-Agent": "Mnemosyne prototype (research interface)" },
     next: { revalidate: 60 * 60 * 12 },
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`Museum API returned ${response.status}`);
 
@@ -252,8 +285,28 @@ export async function GET(request: NextRequest) {
     throw error;
   }
 
+  const mode = process.env.MNEMOSYNE_SEARCH_MODE?.trim();
   const serviceUrl = process.env.MNEMOSYNE_SEARCH_SERVICE_URL?.trim();
-  if (serviceUrl) return proxySearchService(request, serviceUrl, input);
+  if (mode === "artifact") {
+    if (!serviceUrl) {
+      return NextResponse.json(
+        {
+          error: "Artifact search is selected, but MNEMOSYNE_SEARCH_SERVICE_URL is not configured.",
+        },
+        { status: 503 },
+      );
+    }
+    return proxySearchService(request, serviceUrl, input);
+  }
+  if (mode !== "catalogue-demo") {
+    return NextResponse.json(
+      {
+        error:
+          "Search mode is not configured. Set MNEMOSYNE_SEARCH_MODE to artifact or catalogue-demo.",
+      },
+      { status: 503 },
+    );
+  }
 
   const queries: QueryDescriptor[] = parsed.map((query, index) => ({
     id: `q-${index + 1}`,

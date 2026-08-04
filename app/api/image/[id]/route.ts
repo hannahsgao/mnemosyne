@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 
 const IMAGE_ID = /^[a-z0-9-]{20,80}$/i;
 const CACHE_SECONDS = 60 * 60 * 24 * 30;
+const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+const UPSTREAM_TIMEOUT_MS = 10_000;
 
 export async function GET(
   _request: NextRequest,
@@ -23,21 +25,30 @@ export async function GET(
       const response = await fetch(
         `https://www.artic.edu/iiif/2/${id}/full/${width},/0/default.jpg`,
         {
-          cache: "no-store",
+          next: { revalidate: CACHE_SECONDS },
           headers: {
             Accept: "image/jpeg",
             "User-Agent": "Mnemosyne prototype (research interface)",
           },
+          signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
         },
       );
 
       if (!response.ok) continue;
+      const candidateType = response.headers.get("content-type") ?? "";
+      const declaredLength = Number(response.headers.get("content-length") ?? 0);
+      if (
+        !candidateType.startsWith("image/") ||
+        (declaredLength > 0 && declaredLength > MAX_IMAGE_BYTES)
+      ) {
+        continue;
+      }
 
       const candidate = await response.arrayBuffer();
-      if (!candidate.byteLength) continue;
+      if (!candidate.byteLength || candidate.byteLength > MAX_IMAGE_BYTES) continue;
 
       image = candidate;
-      contentType = response.headers.get("content-type") ?? contentType;
+      contentType = candidateType;
       break;
     }
 
@@ -47,6 +58,7 @@ export async function GET(
       headers: {
         "Cache-Control": `public, max-age=${CACHE_SECONDS}, immutable`,
         "Content-Type": contentType,
+        "X-Content-Type-Options": "nosniff",
       },
     });
   } catch (error) {

@@ -30,7 +30,7 @@ export class QuerySyntaxError extends Error {
 }
 
 export function normalizeQueryTerm(value: string) {
-  return value.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+  return value.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 /** Parse commas outside double quotes, preserving literal commas inside a concept. */
