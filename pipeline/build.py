@@ -57,6 +57,7 @@ CANONICAL_FIELDS = (
     "image_rights_uri",
     "credit_line",
     "public_domain",
+    "image_available",
     "image_url",
     "image_sha256",
     "image_width",
@@ -66,6 +67,7 @@ CANONICAL_FIELDS = (
 
 IMAGE_MANIFEST_FIELDS = (
     "artwork_id",
+    "image_available",
     "image_url",
     "image_path",
     "image_sha256",
@@ -197,6 +199,12 @@ def _canonical_record(
     artwork_id = object_id
     public_domain_text = _first(row, "public_domain", "is_public_domain")
     public_domain = parse_bool(public_domain_text) if public_domain_text else None
+    image_available_text = _first(row, "image_available", "has_image")
+    image_available = (
+        parse_bool(image_available_text)
+        if image_available_text
+        else bool(_first(row, "image_url", "image_path"))
+    )
     canonical = {
         "artwork_id": artwork_id,
         "physical_object_id": _first(row, "physical_object_id") or artwork_id,
@@ -227,6 +235,7 @@ def _canonical_record(
         "image_rights_uri": _first(row, "image_rights_uri", "rights_uri"),
         "credit_line": _first(row, "credit_line"),
         "public_domain": public_domain,
+        "image_available": image_available,
         "image_url": _first(row, "image_url"),
         "image_sha256": _first(row, "image_sha256").lower(),
         "image_width": _first(row, "image_width"),
@@ -327,7 +336,7 @@ def _coverage_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
                     "row_count": len(group),
                     "dated_count": sum(row["date_start"] != "" for row in group),
                     "public_domain_count": sum(row["public_domain"] is True for row in group),
-                    "image_count": sum(bool(row["image_url"]) for row in group),
+                    "image_count": sum(bool(row["image_available"]) for row in group),
                 }
             )
     return output
@@ -348,6 +357,7 @@ def _image_rows(raw_rows: list[dict[str, str]], canonical_rows: list[dict[str, o
         output.append(
             {
                 "artwork_id": canonical["artwork_id"],
+                "image_available": canonical["image_available"],
                 "image_url": canonical["image_url"],
                 "image_path": _first(raw, "image_path"),
                 "image_sha256": canonical["image_sha256"],

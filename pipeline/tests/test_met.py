@@ -144,7 +144,15 @@ class MetCorpusBuildTests(unittest.TestCase):
             self.assertEqual(rows["14"]["geography"], "Thebes; Egypt")
             self.assertEqual(rows["14"]["date_start"], "-1405")
             self.assertEqual(rows["14"]["metadata_license"], MET_CC0_URI)
+            self.assertEqual(rows["14"]["image_available"], "True")
             self.assertEqual(rows["14"]["image_url"], "")
+
+            with (output / "coverage.csv").open(encoding="utf-8", newline="") as handle:
+                coverage = list(csv.DictReader(handle))
+            met_coverage = next(
+                row for row in coverage if row["dimension"] == "institution" and row["value"] == "met"
+            )
+            self.assertEqual(met_coverage["image_count"], "2")
 
             weights = sparse.load_npz(output / "date-weights.npz")
             self.assertEqual(weights.shape[0], 2)

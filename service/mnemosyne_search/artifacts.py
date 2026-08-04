@@ -35,7 +35,7 @@ def load_metadata(path: Path) -> tuple[dict[str, Any], ...]:
                 name = _camel_case(key)
                 if name in {"dateStart", "dateEnd", "imageWidth", "imageHeight", "embeddingOffset"}:
                     record[name] = int(value) if value else None
-                elif name == "publicDomain":
+                elif name in {"publicDomain", "imageAvailable"}:
                     record[name] = value.casefold() in {"1", "true", "yes"}
                 else:
                     record[name] = value

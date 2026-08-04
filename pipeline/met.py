@@ -109,6 +109,7 @@ def _canonical_met_row(row: dict[str, str], object_id: int) -> dict[str, object]
         "image_rights_uri": MET_CC0_URI,
         "credit_line": row.get("Credit Line", "").strip(),
         "public_domain": "true",
+        "image_available": "true",
     }
 
 
