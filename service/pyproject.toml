@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mnemosyne-search"
+version = "0.1.0"
+description = "Keyless exact retrieval and concentration-lift service for Mnemosyne"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+faiss = ["faiss-cpu>=1.8"]
+siglip2 = ["torch>=2.2", "transformers>=4.49"]
+
+[project.scripts]
+mnemosyne-search = "mnemosyne_search.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mnemosyne_search*"]

@@ -1,0 +1,144 @@
+"""Typed request and versioned JSON response contracts."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Mapping, NotRequired, TypedDict
+
+
+@dataclass(frozen=True)
+class QueryTerm:
+    id: str
+    label: str
+    normalized: str
+
+
+@dataclass(frozen=True)
+class SearchRequest:
+    query: str
+    selected_query_id: str | None = None
+    selected_bin_key: str | None = None
+    corpus_view: str = "all"
+    filters: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+
+
+class QueryJSON(TypedDict):
+    id: str
+    label: str
+    normalized: str
+
+
+class CorpusJSON(TypedDict):
+    id: str
+    version: str
+    label: str
+    count: int
+    countingUnit: str
+    view: str
+    filters: dict[str, list[str]]
+
+
+class ModelJSON(TypedDict):
+    id: str
+    version: str
+    promptTemplateVersion: str
+
+
+class MetricJSON(TypedDict):
+    id: str
+    version: str
+    label: str
+    percentile: float
+    unit: str
+
+
+class BinJSON(TypedDict):
+    key: str
+    label: str
+    start: int
+    end: int
+    denominator: float
+    objectCount: int
+    clusterCount: int
+    belowMinimumDenominator: bool
+
+
+class PointJSON(TypedDict):
+    binKey: str
+    value: float
+    share: float
+    lift: float
+    hitMass: float
+    objectCount: int
+    clusterCount: int
+
+
+class DiagnosticsJSON(TypedDict):
+    standardizedSeparation: float
+    controlMean: float
+    controlStdDev: float
+    promptTopKJaccard: float
+    reasons: list[str]
+
+
+class SeriesJSON(TypedDict):
+    queryId: str
+    k: int
+    threshold: float
+    lowSignal: bool
+    diagnostics: DiagnosticsJSON
+    points: list[PointJSON]
+    cacheKey: str
+
+
+class EvidenceCardJSON(TypedDict):
+    artworkId: str
+    physicalObjectId: str
+    visualClusterId: str
+    title: str
+    artist: str
+    institution: str
+    sourceRecordUrl: str
+    imageUrl: str
+    dateDisplay: str
+    dateStart: NotRequired[int | None]
+    dateEnd: NotRequired[int | None]
+    dateQualifier: str
+    rawScore: float
+    contributionWeight: float
+    contributor: bool
+    metadataLicense: str
+    imageRightsUri: str
+    creditLine: str
+    publicDomain: bool
+
+
+class EvidenceSlicesJSON(TypedDict):
+    strongest: list[EvidenceCardJSON]
+    representative: list[EvidenceCardJSON]
+    borderline: list[EvidenceCardJSON]
+    randomContributors: list[EvidenceCardJSON]
+    bestNonContributors: list[EvidenceCardJSON]
+    randomDenominator: list[EvidenceCardJSON]
+
+
+class SelectedEvidenceJSON(TypedDict):
+    queryId: str
+    binKey: str
+    slices: EvidenceSlicesJSON
+
+
+class SearchResponse(TypedDict):
+    schemaVersion: str
+    queries: list[QueryJSON]
+    corpus: CorpusJSON
+    model: ModelJSON
+    metric: MetricJSON
+    bins: list[BinJSON]
+    series: list[SeriesJSON]
+    selectedEvidence: SelectedEvidenceJSON
+    warnings: list[str]
+    generatedAt: str
+
+
+JSONValue = str | int | float | bool | None | list[Any] | dict[str, Any]

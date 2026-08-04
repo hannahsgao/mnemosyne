@@ -1,0 +1,29 @@
+{
+  "artifactSchemaVersion": "mnemosyne.artifacts.v1",
+  "corpus": {
+    "id": "fixture-art",
+    "version": "fixture-2026-08-v1",
+    "label": "Deterministic fixture museum corpus",
+    "countingUnit": "physical-object"
+  },
+  "model": {
+    "id": "fixture-static",
+    "version": "v1",
+    "embeddingDimension": 4
+  },
+  "files": {
+    "metadata": "corpus.json",
+    "embeddings": "embeddings.json",
+    "dateWeights": "date-weights.json",
+    "binDenominators": "bin-denominators.json"
+  },
+  "bins": [
+    {"key": "1800-1849", "label": "1800–1849", "start": 1800, "end": 1849},
+    {"key": "1850-1899", "label": "1850–1899", "start": 1850, "end": 1899},
+    {"key": "1900-1949", "label": "1900–1949", "start": 1900, "end": 1949}
+  ],
+  "views": {
+    "public-domain": {"rowIds": [0, 1, 2, 3, 4, 6, 7, 8]}
+  },
+  "allowedFilterFields": ["institution", "objectType", "publicDomain"]
+}

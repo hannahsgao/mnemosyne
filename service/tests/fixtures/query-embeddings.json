@@ -1,0 +1,11 @@
+{
+  "modelId": "fixture-static",
+  "modelVersion": "v1",
+  "vectors": {
+    "horse": [1.0, 0.0, 0.0, 0.0],
+    "ship": [0.0, 1.0, 0.0, 0.0],
+    "train": [0.0, 0.0, 1.0, 0.0],
+    "still life, fruit": [0.0, 0.0, 0.0, 1.0],
+    "flat": [0.5, 0.5, 0.5, 0.5]
+  }
+}

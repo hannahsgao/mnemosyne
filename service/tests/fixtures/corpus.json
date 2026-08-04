@@ -1,0 +1,72 @@
+[
+  {
+    "artworkId": "fixture-000", "physicalObjectId": "object-000", "visualClusterId": "cluster-horse-a",
+    "institution": "The Met", "title": "Horse at Dawn", "artist": "Ada Example", "objectType": "Painting",
+    "sourceRecordUrl": "https://example.test/art/000", "imageUrl": "https://example.test/images/000.jpg",
+    "dateDisplay": "1810", "dateStart": 1810, "dateEnd": 1810, "dateQualifier": "exact",
+    "metadataLicense": "CC0", "imageRightsUri": "https://creativecommons.org/publicdomain/zero/1.0/", "creditLine": "Fixture", "publicDomain": true
+  },
+  {
+    "artworkId": "fixture-001", "physicalObjectId": "object-001", "visualClusterId": "cluster-horse-b",
+    "institution": "The Met", "title": "Mounted Figure", "artist": "Bea Example", "objectType": "Drawing",
+    "sourceRecordUrl": "https://example.test/art/001", "imageUrl": "https://example.test/images/001.jpg",
+    "dateDisplay": "ca. 1820", "dateStart": 1818, "dateEnd": 1822, "dateQualifier": "circa",
+    "metadataLicense": "CC0", "imageRightsUri": "https://creativecommons.org/publicdomain/zero/1.0/", "creditLine": "Fixture", "publicDomain": true
+  },
+  {
+    "artworkId": "fixture-002", "physicalObjectId": "object-002", "visualClusterId": "cluster-ship-a",
+    "institution": "AIC", "title": "Sailing Vessel", "artist": "Cy Example", "objectType": "Painting",
+    "sourceRecordUrl": "https://example.test/art/002", "imageUrl": "https://example.test/images/002.jpg",
+    "dateDisplay": "1830", "dateStart": 1830, "dateEnd": 1830, "dateQualifier": "exact",
+    "metadataLicense": "CC0", "imageRightsUri": "https://creativecommons.org/publicdomain/zero/1.0/", "creditLine": "Fixture", "publicDomain": true
+  },
+  {
+    "artworkId": "fixture-003", "physicalObjectId": "object-003", "visualClusterId": "cluster-ship-b",
+    "institution": "AIC", "title": "Steamship", "artist": "Dee Example", "objectType": "Print",
+    "sourceRecordUrl": "https://example.test/art/003", "imageUrl": "https://example.test/images/003.jpg",
+    "dateDisplay": "1870", "dateStart": 1870, "dateEnd": 1870, "dateQualifier": "exact",
+    "metadataLicense": "CC0", "imageRightsUri": "https://creativecommons.org/publicdomain/zero/1.0/", "creditLine": "Fixture", "publicDomain": true
+  },
+  {
+    "artworkId": "fixture-004", "physicalObjectId": "object-004", "visualClusterId": "cluster-train-a",
+    "institution": "Rijksmuseum", "title": "Express Train", "artist": "Eli Example", "objectType": "Photograph",
+    "sourceRecordUrl": "https://example.test/art/004", "imageUrl": "https://example.test/images/004.jpg",
+    "dateDisplay": "1910", "dateStart": 1910, "dateEnd": 1910, "dateQualifier": "exact",
+    "metadataLicense": "CC0", "imageRightsUri": "https://creativecommons.org/publicdomain/zero/1.0/", "creditLine": "Fixture", "publicDomain": true
+  },
+  {
+    "artworkId": "fixture-005", "physicalObjectId": "object-005", "visualClusterId": "cluster-train-b",
+    "institution": "Rijksmuseum", "title": "Railway Platform", "artist": "Fay Example", "objectType": "Photograph",
+    "sourceRecordUrl": "https://example.test/art/005", "imageUrl": "https://example.test/images/005.jpg",
+    "dateDisplay": "1920", "dateStart": 1920, "dateEnd": 1920, "dateQualifier": "exact",
+    "metadataLicense": "CC0", "imageRightsUri": "https://rightsstatements.org/vocab/InC/1.0/", "creditLine": "Fixture", "publicDomain": false
+  },
+  {
+    "artworkId": "fixture-006", "physicalObjectId": "object-006", "visualClusterId": "cluster-harbor",
+    "institution": "The Met", "title": "Horse by the Harbor", "artist": "Gia Example", "objectType": "Painting",
+    "sourceRecordUrl": "https://example.test/art/006", "imageUrl": "https://example.test/images/006.jpg",
+    "dateDisplay": "1880", "dateStart": 1880, "dateEnd": 1880, "dateQualifier": "exact",
+    "metadataLicense": "CC0", "imageRightsUri": "https://creativecommons.org/publicdomain/zero/1.0/", "creditLine": "Fixture", "publicDomain": true
+  },
+  {
+    "artworkId": "fixture-007", "physicalObjectId": "object-007", "visualClusterId": "cluster-still-a",
+    "institution": "The Met", "title": "Still Life", "artist": "Hal Example", "objectType": "Painting",
+    "sourceRecordUrl": "https://example.test/art/007", "imageUrl": "https://example.test/images/007.jpg",
+    "dateDisplay": "1840", "dateStart": 1840, "dateEnd": 1840, "dateQualifier": "exact",
+    "metadataLicense": "CC0", "imageRightsUri": "https://creativecommons.org/publicdomain/zero/1.0/", "creditLine": "Fixture", "publicDomain": true
+  },
+  {
+    "artworkId": "fixture-008", "physicalObjectId": "object-008", "visualClusterId": "cluster-still-b",
+    "institution": "AIC", "title": "Fruit on a Table", "artist": "Ira Example", "objectType": "Painting",
+    "sourceRecordUrl": "https://example.test/art/008", "imageUrl": "https://example.test/images/008.jpg",
+    "dateDisplay": "1890", "dateStart": 1890, "dateEnd": 1890, "dateQualifier": "exact",
+    "metadataLicense": "CC0", "imageRightsUri": "https://creativecommons.org/publicdomain/zero/1.0/", "creditLine": "Fixture", "publicDomain": true
+  },
+  {
+    "artworkId": "fixture-009", "physicalObjectId": "object-009", "visualClusterId": "cluster-landscape",
+    "institution": "Rijksmuseum", "title": "Open Landscape", "artist": "Jo Example", "objectType": "Painting",
+    "sourceRecordUrl": "https://example.test/art/009", "imageUrl": "https://example.test/images/009.jpg",
+    "dateDisplay": "1930", "dateStart": 1930, "dateEnd": 1930, "dateQualifier": "exact",
+    "metadataLicense": "CC0", "imageRightsUri": "https://rightsstatements.org/vocab/InC/1.0/", "creditLine": "Fixture", "publicDomain": false
+  }
+]
