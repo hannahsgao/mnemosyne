@@ -39,9 +39,10 @@ Store one row per physical museum object and group related records instead of de
 artwork_id, physical_object_id, visual_cluster_id,
 institution, source_id, source_record_url, source_dataset_version,
 title, artist, object_type, medium, culture, department,
+classification, period, dynasty, geography, tags, object_wikidata_url,
 date_display, date_start, date_end, date_qualifier, date_parse_method,
 metadata_license, image_rights_uri, credit_line, public_domain,
-image_url, image_sha256, image_width, image_height, embedding_offset
+image_available, image_url, image_sha256, image_width, image_height, embedding_offset
 ```
 
 Keep the raw source payload beside the canonical table. A `visual_cluster_id` may join duplicate photographs, editions, or depictions while preserving the distinction between separate physical objects. The default counting unit must be stated in the metric; the UI can later offer “museum objects” and “unique visual clusters” as separate corpus views.
@@ -62,6 +63,39 @@ Precompute:
 - coverage summaries by institution, object type, medium, rights status, and date certainty.
 
 Do not describe these bands as uncertainty about all historical art. They measure sensitivity within the observed corpus.
+
+### 2a. Met keyword launch path
+
+The first full-collection product path can avoid embeddings. Build a frozen
+corpus from the official Met Open Access CSV, restricted to public-domain
+records that appear in a snapshotted Collection API `hasImages` result and have
+a usable normalized date. Preserve both source payloads and their checksums.
+
+For each series query `j`, use the keyless Met Collection API to obtain matching
+object IDs, then intersect those IDs with the local eligible corpus before
+aggregation. Broad catalogue search is the default because title-only and
+tag-only search omit useful artist, culture, medium, and other metadata matches.
+Title and tag modes remain explicit diagnostic alternatives.
+
+Using the same precomputed date matrix `W` and denominator `D[b]`:
+
+```text
+matching_mass[j,b] = sum over locally eligible matching i of W[i,b]
+frequency[j,b]     = matching_mass[j,b] / D[b]
+```
+
+This is option A: the direct, denominator-normalized frequency of catalogue
+matches. Every series uses the same corpus and bins, and API matches outside the
+frozen corpus never enter either numerator or evidence. Cache each normalized
+series independently. Fetch live object details only for a small deterministic
+set of evidence cards in the selected bin; those matches are examples, not a
+relevance ranking because the API does not expose scores.
+
+The interface must label this **Met metadata frequency** and state that it
+measures catalogue language, not visual prevalence. Changes in cataloguing
+practice, tag coverage, digitization, public-domain eligibility, and collection
+composition can all move the line. This launch path needs no image downloads,
+model weights, embedding job, vector index, or API key.
 
 ### 3. Embed and index offline
 
@@ -173,6 +207,7 @@ Each card links to the museum record and includes its selected series, physical-
 
 ```text
 Official datasets -> corpus build -> Parquet + source payloads
+Met keyword IDs   -> local ID intersection -> sparse date aggregation
 Permitted images  -> embedding build -> matrix + FAISS index
 Canonical dates   -> date build -> sparse weights + denominators
 

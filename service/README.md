@@ -1,12 +1,42 @@
 # Mnemosyne search service
 
-This package serves the production retrieval contract described in
-`docs/architecture.md`. It performs all query-time work locally: text encoding,
-exact normalized inner-product retrieval, fixed global top-1% concentration
-lift, diagnostics, and evidence selection. End users do not supply an API key.
-The image tower and image downloads remain offline build concerns.
+This package serves both Met catalogue-frequency search and embedding-based
+visual retrieval. End users do not supply an API key in either mode.
 
-## Artifact contract
+## Met keyword mode
+
+This is the simplest full Met path and requires only NumPy at runtime:
+
+```bash
+python3 -m pip install -e ./service
+mnemosyne-search \
+  --artifacts /path/to/met-corpus-build \
+  --met-keyword \
+  --host 127.0.0.1 \
+  --port 8765
+```
+
+For each comma-separated concept the service makes one keyless Met Collection
+API search, intersects the returned object IDs with the local frozen corpus,
+and aggregates the precomputed date weights. The plotted value is:
+
+```text
+metadata_frequency[j,b] = matching_date_weight[j,b] / eligible_date_weight[b]
+```
+
+The bounded per-series cache avoids repeating searches for concepts already
+seen. The service fetches object details only for the selected evidence cards;
+those calls are cached as well. `--met-search-mode broad` is the default;
+`title` and `tags` constrain matching to those catalogue fields. This metric is
+catalogue metadata frequency, not a claim about what is visible in each image.
+
+## Embedding mode
+
+The embedding path performs text encoding, exact normalized inner-product
+retrieval, fixed global top-1% concentration lift, diagnostics, and evidence
+selection. The image tower and image downloads remain offline build concerns.
+
+### Artifact contract
 
 Point the service at a self-contained embedding bundle emitted by
 `python3 -m pipeline embed`. The loader reads `model-manifest.json` and its
@@ -32,7 +62,7 @@ fallback. A filter is applied while scoring the eligible row set; the service
 never retrieves a global top-K and filters it afterward. Exact FAISS subset
 indices are retained in a bounded in-process cache for repeated corpus views.
 
-## Run locally
+### Run locally
 
 Create a virtual environment, then install the base package plus the desired
 local inference/index extras:

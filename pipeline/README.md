@@ -1,10 +1,36 @@
 # Offline corpus pipeline
 
-This package builds a deterministic proof corpus from a **local, pinned
-ArtiFact clean-split CSV**. It never crawls or downloads museum pages. Dirty or
-error-injected inputs are rejected by filename and schema.
+This package builds deterministic corpus artifacts from either a local, pinned
+ArtiFact clean-split CSV or the Met's official Open Access export. It never
+crawls museum pages.
 
-## Run a build
+## Build the Met corpus
+
+The Met adapter is the no-embedding launch path. It selects records that are
+public domain, present in a snapshotted `hasImages` result, and dateable. It
+preserves the original `MetObjects.csv` and image-ID JSON with checksums, while
+precomputing the sparse date weights and denominators used by every query.
+
+```bash
+git clone --depth 1 https://github.com/metmuseum/openaccess.git /path/to/met-openaccess
+git -C /path/to/met-openaccess rev-parse HEAD
+
+python3 -m pipeline build-met \
+  --input /path/to/met-openaccess/MetObjects.csv \
+  --output /path/to/artifacts/met-openaccess-v1 \
+  --corpus-version met-openaccess-v1 \
+  --source-revision COPY_THE_COMMIT_PRINTED_ABOVE \
+  --retrieved-at 2026-08-03T00:00:00Z
+```
+
+When `--image-ids` is omitted, the builder makes one keyless Met Collection API
+search for image-bearing object IDs and saves that response as
+`source-payloads/met-has-images.json`. For reruns, pass that saved file with
+`--image-ids` to reproduce the exact eligibility set without a network call.
+This build downloads neither image bytes nor embeddings; evidence image URLs
+are resolved only for the few cards a user selects.
+
+## Build an ArtiFact proof corpus
 
 From the repository root:
 

@@ -2,30 +2,36 @@
 
 Mnemosyne is a “Google Ngram for art”: search a visual idea, see how its signal changes across time, and trace every point back to example artworks.
 
-The repository now contains both the interaction slice and the artifact-backed
-retrieval path:
+The repository contains the interaction slice and two artifact-backed retrieval
+paths. The quickest full-corpus path uses the Met's official Open Access export
+and keyless Collection API:
 
-1. Build a versioned canonical corpus from a local, pinned `ArtiFact_clean` CSV.
-2. Precompute normalized date weights, bin denominators, image embeddings, and
-   an exact FAISS `IndexFlatIP` index (with a NumPy fallback).
-3. Encode text locally and calculate global top-1% concentration lift at query
-   time; the image tower never runs in the request path.
-4. Compare one to five comma-separated concepts on shared bins and inspect the
-   artworks behind any line and period.
+1. Build a versioned Met corpus of public-domain, image-backed, dateable works.
+2. Precompute normalized date weights and bin denominators once.
+3. Search Met metadata without an API key, intersect IDs locally, and plot the
+   date-weighted matching share of each period.
+4. Compare one to five comma-separated concepts and inspect matching works.
 
-The web app also retains a zero-setup Art Institute of Chicago metadata mode.
+The embedding path remains available for visual-concept retrieval. It builds
+image embeddings and an exact FAISS `IndexFlatIP` index offline, then runs only
+the text encoder, exact retrieval, and global top-1% concentration lift at query
+time. The image tower never runs in a request.
+
+The web app also retains an explicit Art Institute of Chicago metadata demo.
 Its chart is explicitly labelled **relative result density**, not historical
-prevalence or concentration lift. Set `MNEMOSYNE_SEARCH_SERVICE_URL` to use a
-locally hosted artifact-backed service instead.
+prevalence or concentration lift. `MNEMOSYNE_SEARCH_MODE` must name the active
+backend, so an unavailable artifact service cannot silently change the metric.
 
 ## Run locally
 
 ```bash
 npm install
+cp .env.example .env.local
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). No API key or local dataset is required.
+Open [http://localhost:3000](http://localhost:3000). The example environment uses
+the keyless `catalogue-demo` mode, so no API key or local dataset is required.
 
 Enter concepts such as `horse, ship, train`. A comma inside one concept can be
 quoted: `"still life, fruit", flowers`. Up to five unique lines are supported.
@@ -36,7 +42,42 @@ npm test
 npm run build
 ```
 
-## Run the artifact-backed search path
+## Run Art Ngram over the Met
+
+Clone a pinned copy of the Met's official Open Access data, build the local
+denominators, and start the keyword service:
+
+```bash
+git clone --depth 1 https://github.com/metmuseum/openaccess.git /path/to/met-openaccess
+git -C /path/to/met-openaccess rev-parse HEAD
+
+python3 -m pip install -r pipeline/requirements.txt
+python3 -m pipeline build-met \
+  --input /path/to/met-openaccess/MetObjects.csv \
+  --output /path/to/artifacts/met-openaccess-v1 \
+  --corpus-version met-openaccess-v1 \
+  --source-revision COPY_THE_COMMIT_PRINTED_ABOVE \
+  --retrieved-at 2026-08-03T00:00:00Z
+
+python3 -m pip install -e ./service
+mnemosyne-search \
+  --artifacts /path/to/artifacts/met-openaccess-v1 \
+  --met-keyword \
+  --host 127.0.0.1 \
+  --port 8765
+```
+
+`build-met` snapshots the Met API's image-bearing object IDs beside the source
+CSV. Pass `--image-ids /path/to/saved-search.json` to reuse an existing snapshot.
+No images or embeddings are downloaded for this mode. Copy `.env.example` to
+`.env.local`, set `MNEMOSYNE_SEARCH_MODE=artifact`, run `npm run dev`, and the
+web route will proxy to the service.
+
+The plotted value is `matching date weight / eligible date weight` for each
+bin. It measures the frequency of a term in Met catalogue metadata, not the
+visual prevalence of that concept in the images.
+
+## Run the embedding search path
 
 The corpus and embedding builders are documented in
 [`pipeline/README.md`](pipeline/README.md). They use a local clean dataset and a
@@ -60,9 +101,11 @@ mnemosyne-search \
   --port 8765
 ```
 
-Then copy `.env.example` to `.env.local` and run the web app. The Next.js route
-proxies to the service; model paths and service details stay server-side, and
-the end user supplies no API key. See [`service/README.md`](service/README.md)
+Copy `.env.example` to `.env.local`, set `MNEMOSYNE_SEARCH_MODE=artifact`, and
+run the web app. The Next.js route proxies to the service; model paths and
+service details stay server-side, and the end user supplies no API key. Local
+artifact images are served through the backend and a same-origin web route. See
+[`service/README.md`](service/README.md)
 for the complete artifact contract and fixture-only startup command.
 
 ## Verification
@@ -75,22 +118,21 @@ npm run check
 npm run build
 ```
 
-The service suite includes a real boundary test that builds a temporary corpus,
-embeds it offline, loads the resulting bundle, and serves independent aligned
-search series.
+The suites include real boundary tests for both paths: temporary corpus builds,
+Met keyword frequency and evidence, and embedding-based independent series.
 
 ## High-level architecture
 
 ```mermaid
 flowchart LR
-  A[Published normalized data] --> B[Canonical artwork corpus]
-  B --> C[Image embeddings and date weights]
-  Q[Text query] --> D[Text embedding]
-  C --> E[Similarity retrieval]
-  D --> E
-  E --> F[Aggregate by period]
+  A[Official Met bulk data] --> B[Canonical artwork corpus]
+  B --> C[Precomputed date weights and denominators]
+  Q[Comma-separated terms] --> D[Keyless Met metadata search]
+  D --> E[Local eligible-ID intersection]
+  C --> F[Aggregate by period]
+  E --> F
   F --> G[Timeline]
-  F --> H[Contributing artworks]
+  E --> H[Matching artwork evidence]
 ```
 
 The product has two inseparable outputs: a temporal trace and the artworks that produced it. Keeping the evidence trail first-class makes surprising peaks inspectable and exposes collection bias instead of hiding it behind a smooth chart.
