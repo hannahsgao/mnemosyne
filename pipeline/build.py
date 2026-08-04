@@ -42,6 +42,12 @@ CANONICAL_FIELDS = (
     "medium",
     "culture",
     "department",
+    "classification",
+    "period",
+    "dynasty",
+    "geography",
+    "tags",
+    "object_wikidata_url",
     "date_display",
     "date_start",
     "date_end",
@@ -206,6 +212,12 @@ def _canonical_record(
         "medium": _first(row, "medium") or _medium(row),
         "culture": _first(row, "culture"),
         "department": _first(row, "department"),
+        "classification": _first(row, "classification"),
+        "period": _first(row, "period"),
+        "dynasty": _first(row, "dynasty"),
+        "geography": _first(row, "geography"),
+        "tags": _first(row, "tags"),
+        "object_wikidata_url": _first(row, "object_wikidata_url"),
         "date_display": date.display,
         "date_start": date.start if date.start is not None else "",
         "date_end": date.end if date.end is not None else "",
@@ -369,6 +381,12 @@ def build_corpus(
     metadata_license: str = "",
     date_config: DateConfig | None = None,
     require_parquet: bool = False,
+    source_kind: str = "artifact-clean-local-csv",
+    source_payloads: Sequence[Path | str] | None = None,
+    source_payload_row_counts: Mapping[str, int] | None = None,
+    input_row_count: int | None = None,
+    source_counts: Mapping[str, int] | None = None,
+    source_metadata: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build one immutable artifact directory from a local clean-split CSV."""
 
@@ -416,8 +434,20 @@ def build_corpus(
     try:
         source_payload_dir = staging / "source-payloads"
         source_payload_dir.mkdir()
-        copied_source = source_payload_dir / source.name
-        shutil.copyfile(source, copied_source)
+        payload_sources = [Path(path).resolve() for path in source_payloads] if source_payloads else [source]
+        if not payload_sources:
+            raise CorpusBuildError("at least one source payload is required")
+        missing_payloads = [path for path in payload_sources if not path.is_file()]
+        if missing_payloads:
+            raise CorpusBuildError(f"source payload does not exist: {missing_payloads[0]}")
+        payload_names = [path.name for path in payload_sources]
+        if len(payload_names) != len(set(payload_names)):
+            raise CorpusBuildError("source payload filenames must be unique")
+        copied_payloads: list[tuple[Path, Path]] = []
+        for payload in payload_sources:
+            copied = source_payload_dir / payload.name
+            shutil.copyfile(payload, copied)
+            copied_payloads.append((payload, copied))
 
         corpus_csv = staging / "corpus.csv"
         _write_csv(corpus_csv, CANONICAL_FIELDS, canonical_rows)
@@ -476,8 +506,12 @@ def build_corpus(
             _artifact_entry(staging, weights_path, len(canonical_rows)),
             _artifact_entry(staging, denominators_csv, len(denominator_rows)),
             _artifact_entry(staging, coverage_csv, len(coverage)),
-            _artifact_entry(staging, copied_source, len(raw_rows)),
         ]
+        payload_counts = source_payload_row_counts or {}
+        for original, copied in copied_payloads:
+            artifacts.append(
+                _artifact_entry(staging, copied, payload_counts.get(original.name))
+            )
         for wrote, path, count in (
             (wrote_corpus_parquet, corpus_parquet, len(canonical_rows)),
             (wrote_images_parquet, images_parquet, len(image_rows)),
@@ -499,17 +533,26 @@ def build_corpus(
                 "countingUnit": "physical-object",
             },
             "source": {
-                "kind": "artifact-clean-local-csv",
+                "kind": source_kind,
                 "url": source_url,
                 "revision": source_revision,
                 "retrieved_at": _source_date(retrieved_at),
-                "input_filename": source.name,
-                "input_sha256": sha256_file(source),
+                "input_filename": payload_sources[0].name,
+                "input_sha256": sha256_file(payload_sources[0]),
+                "payloads": [
+                    {
+                        "filename": original.name,
+                        "sha256": sha256_file(original),
+                        "bytes": original.stat().st_size,
+                    }
+                    for original in payload_sources
+                ],
+                **dict(source_metadata or {}),
             },
             "date_rules": {"version": DATE_RULES_VERSION, **asdict(config)},
             "counting_unit": "physical-object",
             "counts": {
-                "input_rows": len(raw_rows),
+                "input_rows": input_row_count if input_row_count is not None else len(raw_rows),
                 "canonical_rows": len(canonical_rows),
                 "dated_rows": sum(date.dated for date in dates),
                 "unknown_date_rows": sum(not date.dated for date in dates),
@@ -517,6 +560,7 @@ def build_corpus(
                 "unreviewed_images": sum(
                     row["permission_status"] == "unreviewed" for row in image_rows
                 ),
+                **dict(source_counts or {}),
             },
             "canonical_fields": list(CANONICAL_FIELDS),
             "files": {

@@ -10,6 +10,7 @@ import sys
 from .build import CorpusBuildError, build_corpus
 from .dates import DateConfig
 from .embeddings import DeterministicTestEncoder, Siglip2LocalEncoder, build_embedding_index
+from .met import MET_API_BASE, build_met_corpus
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -27,6 +28,27 @@ def _parser() -> argparse.ArgumentParser:
         "--source-url",
         default="https://huggingface.co/datasets/deem-data/ArtiFact",
     )
+
+    build_met = subparsers.add_parser(
+        "build-met", help="build a public-domain, image-backed Met corpus from MetObjects.csv"
+    )
+    build_met.add_argument("--input", type=Path, required=True, help="official MetObjects.csv")
+    build_met.add_argument("--output", type=Path, required=True)
+    build_met.add_argument("--corpus-version", required=True)
+    build_met.add_argument("--source-revision", required=True, help="pinned metmuseum/openaccess commit")
+    build_met.add_argument(
+        "--image-ids",
+        type=Path,
+        help="saved Met hasImages search JSON; fetched and snapshotted when omitted",
+    )
+    build_met.add_argument("--met-api-base", default=MET_API_BASE)
+    build_met.add_argument("--retrieved-at")
+    build_met.add_argument("--bin-size", type=int, default=10)
+    build_met.add_argument("--circa-years", type=int, default=5)
+    build_met.add_argument("--open-range-years", type=int, default=25)
+    build_met.add_argument("--min-year", type=int)
+    build_met.add_argument("--max-year", type=int)
+    build_met.add_argument("--require-parquet", action="store_true")
     build.add_argument(
         "--retrieved-at",
         help="ISO-8601 retrieval timestamp; omit for deterministic 'not-recorded'",
@@ -71,6 +93,24 @@ def main(argv: list[str] | None = None) -> int:
                 source_url=args.source_url,
                 retrieved_at=args.retrieved_at,
                 metadata_license=args.metadata_license,
+                date_config=DateConfig(
+                    bin_size=args.bin_size,
+                    circa_years=args.circa_years,
+                    open_range_years=args.open_range_years,
+                    min_year=args.min_year,
+                    max_year=args.max_year,
+                ),
+                require_parquet=args.require_parquet,
+            )
+        elif args.command == "build-met":
+            manifest = build_met_corpus(
+                args.input,
+                args.output,
+                corpus_version=args.corpus_version,
+                source_revision=args.source_revision,
+                image_ids_path=args.image_ids,
+                api_base=args.met_api_base,
+                retrieved_at=args.retrieved_at,
                 date_config=DateConfig(
                     bin_size=args.bin_size,
                     circa_years=args.circa_years,
