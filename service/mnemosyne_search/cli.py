@@ -56,7 +56,10 @@ def main(argv: list[str] | None = None) -> int:
         prompt_ensemble=prompts,
         prefer_faiss=not args.no_faiss,
     )
-    serve(service, args.host, args.port)
+    try:
+        serve(service, args.host, args.port)
+    except KeyboardInterrupt:
+        return 130
     return 0
 
 
