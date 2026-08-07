@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,18 +30,12 @@ from .parsing import parse_query
 
 SCHEMA_VERSION = "mnemosyne.search.v1"
 METRIC_ID = "met-metadata-frequency"
-METADATA_WARNING = (
-    "Met metadata frequency measures catalogue keyword matches among eligible Met objects, "
-    "not visual prevalence in the images."
-)
-
-
 @dataclass(frozen=True)
 class MetKeywordConfig:
     search_mode: str = "broad"
     metric_version: str = "v1"
     minimum_denominator: float = 20.0
-    evidence_count: int = 5
+    evidence_count: int = 24
 
     def __post_init__(self) -> None:
         if self.search_mode not in SEARCH_MODES:
@@ -121,7 +116,7 @@ class MetKeywordSearchService:
             request.selected_bin_key, computations[selected_index], corpus
         )
 
-        warnings = [METADATA_WARNING]
+        warnings: list[str] = []
         sparse_count = sum(
             denominator < self.config.minimum_denominator for denominator in corpus.denominators
         )
@@ -338,7 +333,10 @@ class MetKeywordSearchService:
             min(self.config.evidence_count, len(evidence_pool)),
             f"met-evidence:{term.normalized}:{self.artifacts.bins[bin_index].key}",
         )
-        cards = [self._evidence_card(row, bin_index) for row in selected]
+        cards: list[EvidenceCardJSON] = []
+        if selected:
+            with ThreadPoolExecutor(max_workers=min(8, len(selected))) as executor:
+                cards = list(executor.map(lambda row: self._evidence_card(row, bin_index), selected))
         slices: EvidenceSlicesJSON = {
             "strongest": [],
             "representative": [],

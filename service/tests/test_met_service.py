@@ -10,7 +10,7 @@ import unittest
 from pipeline.met import build_met_corpus
 from mnemosyne_search.met_artifacts import MetKeywordArtifacts
 from mnemosyne_search.met_client import FixtureMetClient, SqliteMetClient
-from mnemosyne_search.met_service import METADATA_WARNING, MetKeywordConfig, MetKeywordSearchService
+from mnemosyne_search.met_service import MetKeywordConfig, MetKeywordSearchService
 from mnemosyne_search.models import SearchRequest
 from mnemosyne_search.parsing import parse_query
 
@@ -128,7 +128,7 @@ class MetKeywordSearchTests(unittest.TestCase):
         lion_values = [point["value"] for point in response["series"][1]["points"]]
         self.assertEqual(horse_values, [1.0, 0.0, 1 / 3])
         self.assertEqual(lion_values, [0.0, 0.0, 1 / 3])
-        self.assertEqual(response["warnings"][0], METADATA_WARNING)
+        self.assertFalse(any("visual prevalence" in warning for warning in response["warnings"]))
         json.dumps(response, allow_nan=False)
 
     def test_cache_reuses_each_query_across_multi_series_requests(self) -> None:
