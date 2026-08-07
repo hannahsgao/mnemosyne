@@ -17,7 +17,7 @@ import type {
   SeriesPoint,
   TimeBin,
 } from "../lib/types";
-import { formatTimelineYear, timelineWindow } from "../lib/timeline";
+import { dataTimelineViewport, formatTimelineYear, timelineWindow } from "../lib/timeline";
 
 type TimelineProps = {
   bins: TimeBin[];
@@ -166,10 +166,11 @@ export function Timeline({
 }: TimelineProps) {
   const [hovered, setHovered] = useState<HoveredPoint>(null);
   const baseBins = useMemo(() => timelineWindow(bins), [bins]);
-  const [viewport, setViewport] = useState<Viewport>(() => ({
-    start: 0,
-    end: Math.max(0, baseBins.length - 1),
-  }));
+  const defaultViewport = useMemo(
+    () => dataTimelineViewport(baseBins, series),
+    [baseBins, series],
+  );
+  const [viewport, setViewport] = useState<Viewport>(() => defaultViewport);
   const [dragging, setDragging] = useState(false);
   const [chartSize, setChartSize] = useState<ChartSize>({
     width: DEFAULT_WIDTH,
@@ -186,12 +187,19 @@ export function Timeline({
     () => new Map(queries.map((query, index) => [query.id, { query, index }])),
     [queries],
   );
-  const visibleSeries = series.filter((item) => !hiddenQueryIds.has(item.queryId));
+  const visibleSeries = useMemo(
+    () => series.filter((item) => !hiddenQueryIds.has(item.queryId)),
+    [hiddenQueryIds, series],
+  );
+  const fittedViewport = useMemo(
+    () => dataTimelineViewport(baseBins, visibleSeries),
+    [baseBins, visibleSeries],
+  );
 
   useEffect(() => {
-    setViewport({ start: 0, end: Math.max(0, baseBins.length - 1) });
+    setViewport(defaultViewport);
     setHovered(null);
-  }, [baseBins.length, baseBins[0]?.key, baseBins.at(-1)?.key]);
+  }, [defaultViewport]);
 
   useEffect(() => () => {
     if (viewportFrame.current !== null) cancelAnimationFrame(viewportFrame.current);
@@ -242,9 +250,14 @@ export function Timeline({
         ((displayOffset + index - boundedViewport.start) /
           (boundedViewport.end - boundedViewport.start)) *
           chartWidth;
+  const displayBinKeys = new Set(displayBins.map((bin) => bin.key));
   const largestValue = Math.max(
     metric.unit === "lift" ? 1 : 0,
-    ...visibleSeries.flatMap((item) => item.points.map((point) => point.value)),
+    ...visibleSeries.flatMap((item) =>
+      item.points
+        .filter((point) => displayBinKeys.has(point.binKey))
+        .map((point) => point.value),
+    ),
   );
   const yMax =
     metric.unit === "lift"
@@ -348,7 +361,7 @@ export function Timeline({
   }
 
   function resetViewport() {
-    animateViewport({ start: 0, end: Math.max(0, baseBins.length - 1) });
+    animateViewport(fittedViewport);
     setHovered(null);
   }
 
@@ -560,7 +573,8 @@ export function Timeline({
   const firstVisibleBin = baseBins[Math.min(baseBins.length - 1, Math.ceil(boundedViewport.start))];
   const lastVisibleBin = baseBins[Math.max(0, Math.floor(boundedViewport.end))];
   const viewportChanged =
-    boundedViewport.start > 0.01 || boundedViewport.end < baseBins.length - 1 - 0.01;
+    Math.abs(boundedViewport.start - fittedViewport.start) > 0.01 ||
+    Math.abs(boundedViewport.end - fittedViewport.end) > 0.01;
 
   return (
     <div className="timeline-wrap" role="group" aria-label={`${metric.label} by time period`}>

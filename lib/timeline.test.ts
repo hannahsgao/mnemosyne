@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildRelativeDensityPoints, buildSharedDecadeBins, timelineWindow } from "./timeline.ts";
-import type { TimeBin } from "./types.ts";
+import {
+  buildRelativeDensityPoints,
+  buildSharedDecadeBins,
+  dataTimelineViewport,
+  timelineWindow,
+} from "./timeline.ts";
+import type { SearchSeries, TimeBin } from "./types.ts";
 
 test("builds one shared, gap-free set of decade bins", () => {
   const bins = buildSharedDecadeBins([1899, 1912, null]);
@@ -49,4 +54,25 @@ test("trims statistically thin edge bins from the default chart window", () => {
   ];
 
   assert.deepEqual(timelineWindow(bins).map((bin) => bin.start), [-3_650, -3_640, 2_020]);
+});
+
+test("fits the default viewport to meaningful query mass instead of isolated edge matches", () => {
+  const bins = buildSharedDecadeBins(Array.from({ length: 20 }, (_, index) => 1800 + index * 10));
+  const points = bins.map((bin, index) => ({
+    binKey: bin.key,
+    value: index >= 10 && index <= 12 ? 0.2 : index === 0 ? 0.001 : 0,
+    share: null,
+    lift: null,
+    hitMass: index >= 10 && index <= 12 ? 100 : index === 0 ? 1 : 0,
+    objectCount: index >= 10 && index <= 12 ? 100 : index === 0 ? 1 : 0,
+    clusterCount: index >= 10 && index <= 12 ? 100 : index === 0 ? 1 : 0,
+  }));
+  const series = [{ points }] as SearchSeries[];
+
+  const viewport = dataTimelineViewport(bins, series);
+
+  assert.deepEqual(
+    { start: bins[viewport.start].start, end: bins[viewport.end].start },
+    { start: 1880, end: 1940 },
+  );
 });
