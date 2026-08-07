@@ -3,12 +3,14 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
 from scipy import sparse
 
 from pipeline.build import CorpusBuildError
+from pipeline.dates import DateConfig
 from pipeline.met import MET_CC0_URI, build_met_corpus
 
 
@@ -100,6 +102,14 @@ def write_met_csv(path: Path) -> None:
             "Classification": "Stone Sculpture",
             "Tags": "Lions",
         },
+        {
+            "Object ID": "15",
+            "Is Public Domain": "True",
+            "Title": "Geological specimen",
+            "Object Date": "400,000–300,000 BCE",
+            "Object Begin Date": "-400000",
+            "Object End Date": "-300000",
+        },
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=FIELDS, lineterminator="\n")
@@ -108,7 +118,7 @@ def write_met_csv(path: Path) -> None:
 
 
 class MetCorpusBuildTests(unittest.TestCase):
-    def test_filters_and_preserves_met_metadata_and_source_snapshots(self) -> None:
+    def test_indexes_all_dateable_rows_and_preserves_source_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "MetObjects.csv"
@@ -124,21 +134,23 @@ class MetCorpusBuildTests(unittest.TestCase):
                 source_revision="deadbeef",
                 image_ids_path=image_ids,
                 retrieved_at="2026-08-03T00:00:00Z",
+                date_config=DateConfig(min_year=-15_000, max_year=2029),
             )
 
-            self.assertEqual(manifest["source"]["kind"], "met-open-access-csv-with-api-image-snapshot")
-            self.assertEqual(manifest["source"]["eligibility"], "public-domain AND has-image AND usable-date")
-            self.assertEqual(manifest["counts"]["input_rows"], 5)
-            self.assertEqual(manifest["counts"]["canonical_rows"], 2)
-            self.assertEqual(manifest["counts"]["rejected_not_public_domain"], 1)
-            self.assertEqual(manifest["counts"]["rejected_without_image"], 1)
+            self.assertEqual(manifest["source"]["kind"], "met-open-access-csv-with-local-fts")
+            self.assertEqual(manifest["source"]["eligibility"], "usable-date")
+            self.assertEqual(manifest["counts"]["input_rows"], 6)
+            self.assertEqual(manifest["counts"]["canonical_rows"], 4)
+            self.assertEqual(manifest["counts"]["non_public_domain_rows"], 1)
+            self.assertEqual(manifest["counts"]["rows_without_known_image"], 2)
             self.assertEqual(manifest["counts"]["rejected_without_usable_date"], 1)
+            self.assertEqual(manifest["counts"]["rejected_outside_date_bounds"], 1)
             self.assertTrue((output / "source-payloads" / source.name).is_file())
             self.assertTrue((output / "source-payloads" / image_ids.name).is_file())
 
             with (output / "corpus.csv").open(encoding="utf-8", newline="") as handle:
                 rows = {row["source_id"]: row for row in csv.DictReader(handle)}
-            self.assertEqual(set(rows), {"10", "14"})
+            self.assertEqual(set(rows), {"10", "11", "12", "14"})
             self.assertEqual(rows["10"]["tags"], "Horses|Shorelines")
             self.assertEqual(rows["10"]["object_wikidata_url"], "https://www.wikidata.org/wiki/Q10")
             self.assertEqual(rows["14"]["geography"], "Thebes; Egypt")
@@ -146,17 +158,33 @@ class MetCorpusBuildTests(unittest.TestCase):
             self.assertEqual(rows["14"]["metadata_license"], MET_CC0_URI)
             self.assertEqual(rows["14"]["image_available"], "True")
             self.assertEqual(rows["14"]["image_url"], "")
+            self.assertEqual(rows["11"]["public_domain"], "False")
+            self.assertEqual(rows["12"]["image_available"], "False")
 
             with (output / "coverage.csv").open(encoding="utf-8", newline="") as handle:
                 coverage = list(csv.DictReader(handle))
             met_coverage = next(
                 row for row in coverage if row["dimension"] == "institution" and row["value"] == "met"
             )
-            self.assertEqual(met_coverage["image_count"], "2")
+            self.assertEqual(met_coverage["image_count"], "3")
 
             weights = sparse.load_npz(output / "date-weights.npz")
-            self.assertEqual(weights.shape[0], 2)
-            self.assertAlmostEqual(float(weights.sum()), 2.0)
+            self.assertEqual(weights.shape[0], 4)
+            self.assertAlmostEqual(float(weights.sum()), 4.0)
+
+            index_path = output / manifest["files"]["keywordIndex"]
+            with sqlite3.connect(index_path) as connection:
+                self.assertEqual(connection.execute("SELECT count(*) FROM artworks").fetchone()[0], 4)
+                matches = connection.execute(
+                    """
+                    SELECT artworks.source_id
+                    FROM artwork_fts
+                    JOIN artworks ON artworks.row_id = artwork_fts.rowid
+                    WHERE artwork_fts MATCH '"horse"'
+                    ORDER BY artworks.row_id
+                    """
+                ).fetchall()
+            self.assertEqual(matches, [(10,)])
 
     def test_requires_the_official_met_columns(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

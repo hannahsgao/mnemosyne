@@ -30,7 +30,7 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     build_met = subparsers.add_parser(
-        "build-met", help="build a public-domain, image-backed Met corpus from MetObjects.csv"
+        "build-met", help="build a dateable Met corpus with a local SQLite FTS5 index"
     )
     build_met.add_argument("--input", type=Path, required=True, help="official MetObjects.csv")
     build_met.add_argument("--output", type=Path, required=True)
@@ -39,7 +39,12 @@ def _parser() -> argparse.ArgumentParser:
     build_met.add_argument(
         "--image-ids",
         type=Path,
-        help="saved Met hasImages search JSON; fetched and snapshotted when omitted",
+        help="optional saved Met hasImages search JSON used to mark image availability",
+    )
+    build_met.add_argument(
+        "--fetch-image-ids",
+        action="store_true",
+        help="fetch and snapshot image-bearing IDs once during the build",
     )
     build_met.add_argument("--met-api-base", default=MET_API_BASE)
     build_met.add_argument("--retrieved-at")
@@ -110,6 +115,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_revision=args.source_revision,
                 image_ids_path=args.image_ids,
                 api_base=args.met_api_base,
+                fetch_image_ids=args.fetch_image_ids,
                 retrieved_at=args.retrieved_at,
                 date_config=DateConfig(
                     bin_size=args.bin_size,

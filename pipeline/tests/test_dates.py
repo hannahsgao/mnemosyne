@@ -43,6 +43,10 @@ class DateNormalizationTests(unittest.TestCase):
         self.assertEqual(date.qualifier, "unknown")
         self.assertEqual(uniform_bin_weights(date, 10), {})
 
+    def test_display_year_zero_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "year zero"):
+            normalize_date({"date_display": "0"}, DateConfig())
+
     def test_bce_flags_create_ordered_negative_range(self) -> None:
         date = normalize_date(
             {

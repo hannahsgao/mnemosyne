@@ -124,6 +124,8 @@ _RANGE_RE = re.compile(
 
 
 def _apply_era(year: int, era: str | None, inherited_era: str | None = None) -> int:
+    if year == 0:
+        raise ValueError("year zero is not valid in historical year numbering")
     selected = (era or inherited_era or "").upper()
     return -abs(year) if selected in {"BCE", "BC"} else year
 
