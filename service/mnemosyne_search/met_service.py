@@ -82,13 +82,19 @@ class MetKeywordSearchService:
         self.cache = cache or InMemorySeriesCache()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
+    def close(self) -> None:
+        close = getattr(self.client, "close", None)
+        if callable(close):
+            close()
+
     def health(self) -> dict[str, object]:
+        backend = str(getattr(self.client, "backend", "met-keyword-provider"))
         return {
             "status": "ok",
             "mode": "met-keyword",
             "corpusVersion": self.artifacts.corpus_version,
-            "modelVersion": "met-collection-api-v1",
-            "indexBackend": "met-api-object-ids+local-sparse-date-weights",
+            "modelVersion": "met-local-fts5-v1",
+            "indexBackend": f"{backend}+local-sparse-date-weights",
             "searchMode": self.config.search_mode,
         }
 
@@ -137,7 +143,7 @@ class MetKeywordSearchService:
                 "filters": {key: list(values) for key, values in corpus.filters.items()},
             },
             "model": {
-                "id": "met-collection-api-keyword",
+                "id": "met-local-fts5-keyword",
                 "version": "v1",
                 "promptTemplateVersion": "none",
             },

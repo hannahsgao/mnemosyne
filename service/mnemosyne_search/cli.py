@@ -9,7 +9,7 @@ from .artifacts import ArtifactBundle
 from .encoders import FixtureTextEncoder, Siglip2TextEncoder
 from .http import serve
 from .met_artifacts import MetKeywordArtifacts
-from .met_client import HttpMetClient, MET_API_BASE, SEARCH_MODES
+from .met_client import SEARCH_MODES, SqliteMetClient
 from .met_service import MetKeywordConfig, MetKeywordSearchService
 from .prompting import PromptEnsemble
 from .service import SearchService
@@ -27,9 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--met-keyword",
         action="store_true",
-        help="use keyless Met catalogue search and local metadata-frequency aggregation",
+        help="use the local Met SQLite FTS5 index and metadata-frequency aggregation",
     )
-    parser.add_argument("--met-api-base", default=MET_API_BASE)
     parser.add_argument("--met-search-mode", choices=sorted(SEARCH_MODES), default="broad")
     parser.add_argument(
         "--allow-model-download",
@@ -51,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         met_artifacts = MetKeywordArtifacts.load(args.artifacts)
         service = MetKeywordSearchService(
             met_artifacts,
-            HttpMetClient(args.met_api_base),
+            SqliteMetClient(met_artifacts.keyword_index_path),
             config=MetKeywordConfig(search_mode=args.met_search_mode),
         )
     else:
@@ -78,6 +77,10 @@ def main(argv: list[str] | None = None) -> int:
         serve(service, args.host, args.port)
     except KeyboardInterrupt:
         return 130
+    finally:
+        close = getattr(service, "close", None)
+        if callable(close):
+            close()
     return 0
 
 

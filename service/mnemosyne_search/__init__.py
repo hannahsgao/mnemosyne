@@ -3,7 +3,7 @@
 from .artifacts import ArtifactBundle
 from .encoders import DeterministicHashEncoder, FixtureTextEncoder, Siglip2TextEncoder
 from .met_artifacts import MetKeywordArtifacts
-from .met_client import FixtureMetClient, HttpMetClient
+from .met_client import FixtureMetClient, HttpMetClient, SqliteMetClient
 from .met_service import MetKeywordConfig, MetKeywordSearchService
 from .service import SearchConfig, SearchService
 
@@ -19,4 +19,5 @@ __all__ = [
     "SearchConfig",
     "SearchService",
     "Siglip2TextEncoder",
+    "SqliteMetClient",
 ]

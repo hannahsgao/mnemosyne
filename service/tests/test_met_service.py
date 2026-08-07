@@ -9,7 +9,7 @@ import unittest
 
 from pipeline.met import build_met_corpus
 from mnemosyne_search.met_artifacts import MetKeywordArtifacts
-from mnemosyne_search.met_client import FixtureMetClient
+from mnemosyne_search.met_client import SqliteMetClient
 from mnemosyne_search.met_service import METADATA_WARNING, MetKeywordConfig, MetKeywordSearchService
 from mnemosyne_search.models import SearchRequest
 from mnemosyne_search.parsing import parse_query
@@ -83,38 +83,27 @@ def build_fixture(root: Path) -> MetKeywordArtifacts:
     return MetKeywordArtifacts.load(output)
 
 
+class CountingSqliteMetClient(SqliteMetClient):
+    def __init__(self, database: Path) -> None:
+        super().__init__(database)
+        self.search_calls: list[tuple[str, str]] = []
+        self.object_calls: list[int] = []
+
+    def search(self, query: str, mode: str = "broad") -> tuple[int, ...]:
+        self.search_calls.append((query, mode))
+        return super().search(query, mode)
+
+    def object(self, object_id: int):
+        self.object_calls.append(object_id)
+        return super().object(object_id)
+
+
 class MetKeywordSearchTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.artifacts = build_fixture(self.root)
-        self.client = FixtureMetClient(
-            {
-                "horse": [10, 11, 14, 999999],
-                "lion": [12],
-                "none": [],
-            },
-            {
-                10: {
-                    "objectID": 10,
-                    "isPublicDomain": True,
-                    "title": "Horse One (live detail)",
-                    "artistDisplayName": "Ada Artist",
-                    "primaryImageSmall": "https://images.metmuseum.org/10-small.jpg",
-                    "objectURL": "https://www.metmuseum.org/art/collection/search/10",
-                },
-                11: {
-                    "objectID": 11,
-                    "isPublicDomain": True,
-                    "primaryImageSmall": "https://images.metmuseum.org/11-small.jpg",
-                },
-                12: {
-                    "objectID": 12,
-                    "isPublicDomain": True,
-                    "primaryImageSmall": "https://images.metmuseum.org/12-small.jpg",
-                },
-            },
-        )
+        self.client = CountingSqliteMetClient(self.artifacts.keyword_index_path)
         self.service = MetKeywordSearchService(
             self.artifacts,
             self.client,
@@ -123,6 +112,7 @@ class MetKeywordSearchTests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        self.client.close()
         self.temporary.cleanup()
 
     def test_multi_series_frequency_uses_local_eligible_denominator(self) -> None:
@@ -130,14 +120,14 @@ class MetKeywordSearchTests(unittest.TestCase):
 
         self.assertEqual(response["metric"]["unit"], "frequency")
         self.assertEqual(response["metric"]["label"], "Met metadata frequency")
-        self.assertEqual(response["corpus"]["count"], 4)
-        self.assertEqual([series["k"] for series in response["series"]], [2, 1])
-        self.assertEqual([series["totalMatches"] for series in response["series"]], [4, 1])
-        self.assertEqual([item["denominator"] for item in response["bins"]], [2.0, 0.0, 2.0])
+        self.assertEqual(response["corpus"]["count"], 5)
+        self.assertEqual([series["k"] for series in response["series"]], [3, 1])
+        self.assertEqual([series["totalMatches"] for series in response["series"]], [3, 1])
+        self.assertEqual([item["denominator"] for item in response["bins"]], [2.0, 0.0, 3.0])
         horse_values = [point["value"] for point in response["series"][0]["points"]]
         lion_values = [point["value"] for point in response["series"][1]["points"]]
-        self.assertEqual(horse_values, [1.0, 0.0, 0.0])
-        self.assertEqual(lion_values, [0.0, 0.0, 0.5])
+        self.assertEqual(horse_values, [1.0, 0.0, 1 / 3])
+        self.assertEqual(lion_values, [0.0, 0.0, 1 / 3])
         self.assertEqual(response["warnings"][0], METADATA_WARNING)
         json.dumps(response, allow_nan=False)
 
@@ -145,6 +135,11 @@ class MetKeywordSearchTests(unittest.TestCase):
         self.service.search(SearchRequest(query="horse, lion"))
         self.service.search(SearchRequest(query="lion, horse"))
         self.assertEqual(self.client.search_calls, [("horse", "broad"), ("lion", "broad")])
+
+    def test_local_fts_supports_phrase_title_and_tag_search(self) -> None:
+        self.assertEqual(self.client.search("horse one", "title"), (10,))
+        self.assertEqual(self.client.search("horse", "title"), (10, 11))
+        self.assertEqual(self.client.search("horse", "tags"), (10, 11, 14))
 
     def test_selected_evidence_fetches_only_matching_cards_for_the_bin(self) -> None:
         horse_id = parse_query("horse")[0].id
@@ -157,7 +152,7 @@ class MetKeywordSearchTests(unittest.TestCase):
         )
         cards = response["selectedEvidence"]["slices"]["randomContributors"]
         self.assertEqual({card["artworkId"] for card in cards}, {"MET_10", "MET_11"})
-        self.assertTrue(all(card["imageUrl"] for card in cards))
+        self.assertTrue(all(not card["imageUrl"] for card in cards))
         self.assertTrue(all(card["rawScore"] is None for card in cards))
         self.assertEqual(set(self.client.object_calls), {10, 11})
 

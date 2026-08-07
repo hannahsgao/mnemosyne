@@ -3,22 +3,108 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import sqlite3
 from threading import RLock
 import time
 from typing import Any, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
 MET_API_BASE = "https://collectionapi.metmuseum.org/public/collection/v1"
 SEARCH_MODES = frozenset({"broad", "title", "tags"})
+MET_FTS_SCHEMA_VERSION = 1
 
 
 class MetClient(Protocol):
     def search(self, query: str, mode: str = "broad") -> tuple[int, ...]: ...
 
     def object(self, object_id: int) -> Mapping[str, Any] | None: ...
+
+
+class SqliteMetClient:
+    """Read-only local Met full-text search and evidence metadata provider."""
+
+    backend = "sqlite-fts5"
+
+    def __init__(self, database: str | Path) -> None:
+        self.database = Path(database).resolve()
+        if not self.database.is_file():
+            raise ValueError(f"Met FTS database does not exist: {self.database}")
+        encoded = quote(self.database.as_posix(), safe="/")
+        self._database_connection = sqlite3.connect(
+            f"file:{encoded}?mode=ro&immutable=1",
+            uri=True,
+            timeout=5,
+            check_same_thread=False,
+        )
+        self._database_connection.row_factory = sqlite3.Row
+        self._database_connection.execute("PRAGMA query_only=ON")
+        self._database_lock = RLock()
+        version = int(self._database_connection.execute("PRAGMA user_version").fetchone()[0])
+        if version != MET_FTS_SCHEMA_VERSION:
+            self._database_connection.close()
+            raise ValueError(f"unsupported Met FTS schema version: {version}")
+
+    def close(self) -> None:
+        with self._database_lock:
+            self._database_connection.close()
+
+    @staticmethod
+    def _expression(query: str, mode: str) -> str | None:
+        if mode not in SEARCH_MODES:
+            raise ValueError(f"unsupported Met search mode: {mode}")
+        if not any(character.isalnum() for character in query):
+            return None
+        escaped = query.replace('"', '""')
+        phrase = f'"{escaped}"'
+        return phrase if mode == "broad" else f"{mode} : {phrase}"
+
+    def search(self, query: str, mode: str = "broad") -> tuple[int, ...]:
+        expression = self._expression(query, mode)
+        if expression is None:
+            return ()
+        try:
+            with self._database_lock:
+                rows = self._database_connection.execute(
+                    """
+                    SELECT artworks.source_id
+                    FROM artwork_fts
+                    JOIN artworks ON artworks.row_id = artwork_fts.rowid
+                    WHERE artwork_fts MATCH ?
+                    ORDER BY artworks.row_id
+                    """,
+                    (expression,),
+                )
+                return tuple(int(row[0]) for row in rows)
+        except sqlite3.Error as exc:
+            raise RuntimeError(f"local Met FTS search failed: {exc}") from exc
+
+    def object(self, object_id: int) -> Mapping[str, Any] | None:
+        with self._database_lock:
+            row = self._database_connection.execute(
+                """
+                SELECT source_id, title, artist, date_display, object_url,
+                       image_url, credit_line, public_domain
+                FROM artworks
+                WHERE source_id = ?
+                """,
+                (object_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "objectID": int(row["source_id"]),
+            "title": str(row["title"]),
+            "artistDisplayName": str(row["artist"]),
+            "objectDate": str(row["date_display"]),
+            "objectURL": str(row["object_url"]),
+            "primaryImageSmall": str(row["image_url"]),
+            "creditLine": str(row["credit_line"]),
+            "isPublicDomain": bool(row["public_domain"]),
+        }
 
 
 class HttpMetClient:

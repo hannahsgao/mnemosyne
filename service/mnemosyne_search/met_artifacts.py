@@ -20,7 +20,7 @@ from .artifacts import (
 
 
 MET_CORPUS_SCHEMA_VERSION = "mnemosyne-corpus-build/v1"
-MET_SOURCE_KIND = "met-open-access-csv-with-api-image-snapshot"
+MET_SOURCE_KIND = "met-open-access-csv-with-local-fts"
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,7 @@ class MetKeywordArtifacts:
     corpus_version: str
     corpus_label: str
     counting_unit: str
+    keyword_index_path: Path
     metadata: tuple[dict[str, Any], ...]
     bins: tuple[Bin, ...]
     date_weights: SparseDateWeights
@@ -53,6 +54,12 @@ class MetKeywordArtifacts:
         files = manifest["files"]
         if files.get("embeddings") is not None:
             raise ValueError("Met keyword artifacts must use the embedding-free corpus build")
+        keyword_index_name = files.get("keywordIndex")
+        if not keyword_index_name:
+            raise ValueError("Met keyword artifacts are missing the local FTS index")
+        keyword_index_path = (base / str(keyword_index_name)).resolve()
+        if not keyword_index_path.is_file():
+            raise ValueError("manifest-declared Met FTS index does not exist")
         metadata = load_metadata(base / files["metadata"])
         weight_path = base / files["dateWeights"]
         weights = (
@@ -109,12 +116,19 @@ class MetKeywordArtifacts:
             source_id_to_row[source_id] = index
 
         corpus = manifest["corpus"]
+        search_index = manifest.get("search_index", {})
+        if (
+            search_index.get("backend") != "sqlite-fts5"
+            or int(search_index.get("rows", -1)) != len(metadata)
+        ):
+            raise ValueError("Met FTS manifest metadata is inconsistent with the corpus")
         return cls(
             root=base,
             corpus_id=str(corpus["id"]),
             corpus_version=str(corpus["version"]),
             corpus_label=str(corpus.get("label", "The Met Open Access collection")),
             counting_unit=str(corpus.get("countingUnit", "physical-object")),
+            keyword_index_path=keyword_index_path,
             metadata=metadata,
             bins=tuple(bins),
             date_weights=weights,
