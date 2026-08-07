@@ -14,6 +14,7 @@ import type {
 const INITIAL_QUERY = "horse, ship";
 const EXAMPLE_QUERIES = ["horse, ship", '"still life, fruit", flowers', "loneliness, joy"];
 const INITIAL_VISIBLE_WORKS = 5;
+const MAX_VISIBLE_WORKS = 25;
 const EVIDENCE_ORDER: EvidenceSliceName[] = [
   "strongest",
   "representative",
@@ -229,10 +230,12 @@ export default function Home() {
     () => selectedEvidenceItems(result, selection),
     [result, selection],
   );
-  const visibleItems = showAllExamples
-    ? selectedItems
-    : selectedItems.slice(0, INITIAL_VISIBLE_WORKS);
-  const hiddenExampleCount = Math.max(0, selectedItems.length - INITIAL_VISIBLE_WORKS);
+  const visibleItemCount = showAllExamples ? MAX_VISIBLE_WORKS : INITIAL_VISIBLE_WORKS;
+  const visibleItems = selectedItems.slice(0, visibleItemCount);
+  const hiddenExampleCount = Math.max(
+    0,
+    Math.min(selectedItems.length, MAX_VISIBLE_WORKS) - INITIAL_VISIBLE_WORKS,
+  );
   const selectedQuery = result?.queries.find((query) => query.id === selection?.queryId) ?? null;
   const selectedBin = result?.bins.find((bin) => bin.key === selection?.binKey) ?? null;
   const selectedSeries = result?.series.find((series) => series.queryId === selection?.queryId) ?? null;

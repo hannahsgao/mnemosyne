@@ -99,6 +99,9 @@ class CountingSqliteMetClient(SqliteMetClient):
 
 
 class MetKeywordSearchTests(unittest.TestCase):
+    def test_default_evidence_cap_is_twenty_five(self) -> None:
+        self.assertEqual(MetKeywordConfig().evidence_count, 25)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

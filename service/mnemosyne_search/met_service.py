@@ -35,7 +35,7 @@ class MetKeywordConfig:
     search_mode: str = "broad"
     metric_version: str = "v1"
     minimum_denominator: float = 20.0
-    evidence_count: int = 24
+    evidence_count: int = 25
 
     def __post_init__(self) -> None:
         if self.search_mode not in SEARCH_MODES:
