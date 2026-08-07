@@ -41,6 +41,11 @@ type Viewport = {
   end: number;
 };
 
+type ChartSize = {
+  width: number;
+  height: number;
+};
+
 type DragState = {
   pointerId: number;
   startX: number;
@@ -75,12 +80,8 @@ type EndLabel = {
 
 export const SERIES_COLORS = ["#1a73e8", "#d93025", "#188038", "#9334e6", "#e37400"];
 
-const WIDTH = 1120;
-const HEIGHT = 260;
-const PAD_LEFT = 68;
-const PAD_RIGHT = 112;
-const PAD_TOP = 4;
-const PAD_BOTTOM = 24;
+const DEFAULT_WIDTH = 1120;
+const DEFAULT_HEIGHT = 440;
 const LABEL_GAP = 17;
 const MIN_VISIBLE_BINS = 12;
 
@@ -142,6 +143,16 @@ function layoutEndLabels(labels: Omit<EndLabel, "labelY">[], top: number, bottom
   return arranged;
 }
 
+function VisibilityIcon({ hidden }: { hidden: boolean }) {
+  return (
+    <svg className="visibility-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M1.5 8c1.7-2.4 3.8-3.6 6.5-3.6s4.8 1.2 6.5 3.6c-1.7 2.4-3.8 3.6-6.5 3.6S3.2 10.4 1.5 8Z" />
+      <circle cx="8" cy="8" r="2" />
+      {hidden && <path className="visibility-slash" d="m3 3 10 10" />}
+    </svg>
+  );
+}
+
 export function Timeline({
   bins,
   series,
@@ -160,6 +171,11 @@ export function Timeline({
     end: Math.max(0, baseBins.length - 1),
   }));
   const [dragging, setDragging] = useState(false);
+  const [chartSize, setChartSize] = useState<ChartSize>({
+    width: DEFAULT_WIDTH,
+    height: DEFAULT_HEIGHT,
+  });
+  const chartRef = useRef<SVGSVGElement | null>(null);
   const queuedViewport = useRef<Viewport | null>(null);
   const viewportFrame = useRef<number | null>(null);
   const animationFrame = useRef<number | null>(null);
@@ -182,18 +198,47 @@ export function Timeline({
     if (animationFrame.current !== null) cancelAnimationFrame(animationFrame.current);
   }, []);
 
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || typeof ResizeObserver === "undefined") return;
+
+    const updateSize = () => {
+      const bounds = chart.getBoundingClientRect();
+      const next = {
+        width: Math.max(320, Math.round(bounds.width)),
+        height: Math.max(160, Math.round(bounds.height)),
+      };
+      setChartSize((current) =>
+        current.width === next.width && current.height === next.height ? current : next,
+      );
+    };
+
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(chart);
+    return () => observer.disconnect();
+  }, []);
+
   if (!baseBins.length || !series.length) return null;
+  const viewWidth = chartSize.width;
+  const viewHeight = chartSize.height;
+  const compactChart = viewWidth < 640;
+  const showEndLabels = viewWidth >= 760;
+  const padLeft = compactChart ? 46 : 64;
+  const padRight = showEndLabels ? Math.min(112, Math.max(88, viewWidth * 0.1)) : 12;
+  const padTop = 8;
+  const padBottom = compactChart ? 26 : 28;
   const boundedViewport = clampViewport(viewport, baseBins.length);
   const displayOffset = Math.floor(boundedViewport.start);
   const displayEnd = Math.ceil(boundedViewport.end);
   const displayBins = baseBins.slice(displayOffset, displayEnd + 1);
 
-  const chartWidth = WIDTH - PAD_LEFT - PAD_RIGHT;
-  const chartHeight = HEIGHT - PAD_TOP - PAD_BOTTOM;
+  const chartWidth = viewWidth - padLeft - padRight;
+  const chartHeight = viewHeight - padTop - padBottom;
   const x = (index: number) =>
     boundedViewport.end === boundedViewport.start
-      ? PAD_LEFT + chartWidth / 2
-      : PAD_LEFT +
+      ? padLeft + chartWidth / 2
+      : padLeft +
         ((displayOffset + index - boundedViewport.start) /
           (boundedViewport.end - boundedViewport.start)) *
           chartWidth;
@@ -207,9 +252,15 @@ export function Timeline({
       : metric.unit === "frequency" && largestValue > 0
         ? niceMaximum(largestValue * 1.04)
         : 1;
-  const y = (value: number) => PAD_TOP + chartHeight - (Math.max(0, value) / yMax) * chartHeight;
-  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((tick) => tick * yMax);
-  const labelEvery = Math.max(1, Math.ceil((boundedViewport.end - boundedViewport.start + 1) / 7));
+  const y = (value: number) => padTop + chartHeight - (Math.max(0, value) / yMax) * chartHeight;
+  const yTicks = (compactChart ? [0, 0.5, 1] : [0, 0.25, 0.5, 0.75, 1]).map(
+    (tick) => tick * yMax,
+  );
+  const maximumXLabels = Math.max(3, Math.floor(chartWidth / (compactChart ? 92 : 125)));
+  const labelEvery = Math.max(
+    1,
+    Math.ceil((boundedViewport.end - boundedViewport.start + 1) / maximumXLabels),
+  );
   const selectedBinIndex = selection
     ? displayBins.findIndex((bin) => bin.key === selection.binKey)
     : -1;
@@ -235,9 +286,11 @@ export function Timeline({
     }];
   });
 
-  const endLabels = layoutEndLabels(
+  const endLabels = showEndLabels ? layoutEndLabels(
     plots.flatMap((plot) => {
-      const visiblePoints = plot.plotted.filter(({ index }) => x(index) >= PAD_LEFT && x(index) <= WIDTH - PAD_RIGHT);
+      const visiblePoints = plot.plotted.filter(
+        ({ index }) => x(index) >= padLeft && x(index) <= viewWidth - padRight,
+      );
       const endpoint = [...visiblePoints].reverse().find(({ point }) => point.value > 0) ?? visiblePoints.at(-1);
       if (!endpoint) return [];
       return [{
@@ -247,9 +300,9 @@ export function Timeline({
         pointY: y(endpoint.point.value),
       }];
     }),
-    PAD_TOP + 8,
-    PAD_TOP + chartHeight - 8,
-  );
+    padTop + 8,
+    padTop + chartHeight - 8,
+  ) : [];
 
   function stopViewportAnimation() {
     if (animationFrame.current !== null) {
@@ -304,8 +357,8 @@ export function Timeline({
     if (!svg) return null;
     const bounds = svg.getBoundingClientRect();
     return {
-      left: bounds.left + (PAD_LEFT / WIDTH) * bounds.width,
-      width: (chartWidth / WIDTH) * bounds.width,
+      left: bounds.left + (padLeft / viewWidth) * bounds.width,
+      width: (chartWidth / viewWidth) * bounds.width,
     };
   }
 
@@ -313,15 +366,15 @@ export function Timeline({
     const svg = event.currentTarget.ownerSVGElement;
     if (!svg || plots.length === 0) return null;
     const bounds = svg.getBoundingClientRect();
-    const pointerX = ((event.clientX - bounds.left) / bounds.width) * WIDTH;
-    const pointerY = ((event.clientY - bounds.top) / bounds.height) * HEIGHT;
+    const pointerX = ((event.clientX - bounds.left) / bounds.width) * viewWidth;
+    const pointerY = ((event.clientY - bounds.top) / bounds.height) * viewHeight;
     const absoluteIndex = Math.max(
       0,
       Math.min(
         baseBins.length - 1,
         Math.round(
           boundedViewport.start +
-            ((pointerX - PAD_LEFT) / chartWidth) *
+            ((pointerX - padLeft) / chartWidth) *
               (boundedViewport.end - boundedViewport.start),
         ),
       ),
@@ -512,27 +565,28 @@ export function Timeline({
   return (
     <div className="timeline-wrap" role="group" aria-label={`${metric.label} by time period`}>
       <svg
+        ref={chartRef}
         className="timeline"
-        viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+        viewBox={`0 0 ${viewWidth} ${viewHeight}`}
         role="img"
         preserveAspectRatio="xMidYMid meet"
       >
         <title>{`${metric.label} for ${queries.map((query) => query.label).join(", ")}`}</title>
         <defs>
           <clipPath id="timeline-plot-clip">
-            <rect x={PAD_LEFT} y={PAD_TOP} width={chartWidth} height={chartHeight} />
+            <rect x={padLeft} y={padTop} width={chartWidth} height={chartHeight} />
           </clipPath>
         </defs>
         {yTicks.map((tick) => (
           <g key={tick}>
             <line
               className="grid-line"
-              x1={PAD_LEFT}
-              x2={WIDTH - PAD_RIGHT}
+              x1={padLeft}
+              x2={viewWidth - padRight}
               y1={y(tick)}
               y2={y(tick)}
             />
-            <text className="axis-label y-axis-label" x={PAD_LEFT - 12} y={y(tick) + 4} textAnchor="end">
+            <text className="axis-label y-axis-label" x={padLeft - 10} y={y(tick) + 4} textAnchor="end">
               {formatValue(tick, metric)}
             </text>
           </g>
@@ -540,27 +594,27 @@ export function Timeline({
 
         <line
           className="axis-domain"
-          x1={PAD_LEFT}
-          x2={WIDTH - PAD_RIGHT}
-          y1={PAD_TOP + chartHeight}
-          y2={PAD_TOP + chartHeight}
+          x1={padLeft}
+          x2={viewWidth - padRight}
+          y1={padTop + chartHeight}
+          y2={padTop + chartHeight}
         />
 
         {metric.unit === "lift" && (
           <line
             className="baseline-line"
-            x1={PAD_LEFT}
-            x2={WIDTH - PAD_RIGHT}
+            x1={padLeft}
+            x2={viewWidth - padRight}
             y1={y(1)}
             y2={y(1)}
           />
         )}
 
         {displayBins.map((bin, index) => (
-          x(index) >= PAD_LEFT &&
-          x(index) <= WIDTH - PAD_RIGHT &&
+          x(index) >= padLeft &&
+          x(index) <= viewWidth - padRight &&
           (index % labelEvery === 0 || index === displayBins.length - 1) && (
-            <text className="axis-label" key={bin.key} x={x(index)} y={HEIGHT - 17} textAnchor="middle">
+            <text className="axis-label" key={bin.key} x={x(index)} y={viewHeight - 8} textAnchor="middle">
               {formatTimelineYear(bin.start)}
             </text>
           )
@@ -583,8 +637,8 @@ export function Timeline({
               className="selection-line"
               x1={x(selectedBinIndex)}
               x2={x(selectedBinIndex)}
-              y1={PAD_TOP}
-              y2={PAD_TOP + chartHeight}
+              y1={padTop}
+              y2={padTop + chartHeight}
             />
             <circle
               className="selected-dot"
@@ -602,8 +656,8 @@ export function Timeline({
               className="cursor-line"
               x1={hoverX}
               x2={hoverX}
-              y1={PAD_TOP}
-              y2={PAD_TOP + chartHeight}
+              y1={padTop}
+              y2={padTop + chartHeight}
             />
             {plots.map((plot) => {
               const point = plot.pointsByBin.get(hoverBin.key);
@@ -640,12 +694,12 @@ export function Timeline({
           >
             <path
               className="endpoint-leader"
-              d={`M${x(index) + 4} ${pointY} L${WIDTH - PAD_RIGHT + 7} ${labelY}`}
+              d={`M${x(index) + 4} ${pointY} L${viewWidth - padRight + 7} ${labelY}`}
               style={{ stroke: plot.color }}
             />
             <text
               className="endpoint-label"
-              x={WIDTH - PAD_RIGHT + 11}
+              x={viewWidth - padRight + 11}
               y={labelY + 4}
               style={{ fill: plot.color }}
             >
@@ -657,7 +711,7 @@ export function Timeline({
         {hovered && hoverPlot && hoverPoint && hoverBin && (
           <g
             className="chart-tooltip"
-            transform={`translate(${Math.min(WIDTH - PAD_RIGHT - 196, Math.max(PAD_LEFT + 6, hoverX + 12))},${Math.max(PAD_TOP + 4, hoverY - 58)})`}
+            transform={`translate(${Math.min(viewWidth - padRight - 196, Math.max(padLeft + 6, hoverX + 12))},${Math.max(padTop + 4, hoverY - 58)})`}
             aria-hidden="true"
           >
             <rect width="184" height="48" rx="5" />
@@ -670,8 +724,8 @@ export function Timeline({
 
         <rect
           className={dragging ? "chart-interaction-layer dragging" : "chart-interaction-layer"}
-          x={PAD_LEFT}
-          y={PAD_TOP}
+          x={padLeft}
+          y={padTop}
           width={chartWidth}
           height={chartHeight}
           role="button"
@@ -716,7 +770,7 @@ export function Timeline({
                   aria-pressed={!hidden}
                   aria-label={`${hidden ? "Show" : "Hide"} ${query.label}`}
                 >
-                  {hidden ? "+" : "−"}
+                  <VisibilityIcon hidden={hidden} />
                 </button>
               </span>
             );
@@ -726,11 +780,10 @@ export function Timeline({
           <span className="viewport-range">
             {formatTimelineYear(firstVisibleBin.start)}–{formatTimelineYear(lastVisibleBin.end)}
           </span>
-          <span className="timeline-hint">Drag to pan · scroll to zoom</span>
           <div className="zoom-buttons" aria-label="Chart zoom controls">
-            <button type="button" onClick={() => zoomBy(0.68, 0.5, true)} aria-label="Zoom in">+</button>
             <button type="button" onClick={() => zoomBy(1.47, 0.5, true)} aria-label="Zoom out">−</button>
-            <button type="button" onClick={resetViewport} disabled={!viewportChanged}>Reset</button>
+            <button type="button" onClick={() => zoomBy(0.68, 0.5, true)} aria-label="Zoom in">+</button>
+            <button type="button" onClick={resetViewport} disabled={!viewportChanged}>Fit</button>
           </div>
         </div>
       </div>

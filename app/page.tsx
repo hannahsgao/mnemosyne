@@ -13,7 +13,7 @@ import type {
 
 const INITIAL_QUERY = "horse, ship";
 const EXAMPLE_QUERIES = ["horse, ship", '"still life, fruit", flowers', "loneliness, joy"];
-const MAX_VISIBLE_WORKS = 5;
+const INITIAL_VISIBLE_WORKS = 5;
 const EVIDENCE_ORDER: EvidenceSliceName[] = [
   "strongest",
   "representative",
@@ -26,7 +26,6 @@ const EVIDENCE_ORDER: EvidenceSliceName[] = [
 const EVIDENCE_LABELS: Partial<Record<EvidenceSliceName, string>> = {
   representative: "Representative",
   borderline: "Near threshold",
-  randomContributors: "Contributing sample",
   bestNonContributors: "Best available match",
   randomDenominator: "Corpus sample",
 };
@@ -107,6 +106,7 @@ export default function Home() {
   const [hiddenQueryIds, setHiddenQueryIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [evidenceLoading, setEvidenceLoading] = useState(false);
+  const [showAllExamples, setShowAllExamples] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestId = useRef(0);
   const evidenceRequestId = useRef(0);
@@ -133,6 +133,7 @@ export default function Home() {
     setEvidenceLoading(false);
     setError(null);
     setSelection(null);
+    setShowAllExamples(false);
     setHiddenQueryIds(new Set());
 
     try {
@@ -170,6 +171,12 @@ export default function Home() {
   }
 
   async function loadEvidence(nextSelection: ChartSelection) {
+    if (
+      selection?.queryId !== nextSelection.queryId ||
+      selection?.binKey !== nextSelection.binKey
+    ) {
+      setShowAllExamples(false);
+    }
     setSelection(nextSelection);
     if (
       result?.selectedEvidence?.queryId === nextSelection.queryId &&
@@ -222,6 +229,10 @@ export default function Home() {
     () => selectedEvidenceItems(result, selection),
     [result, selection],
   );
+  const visibleItems = showAllExamples
+    ? selectedItems
+    : selectedItems.slice(0, INITIAL_VISIBLE_WORKS);
+  const hiddenExampleCount = Math.max(0, selectedItems.length - INITIAL_VISIBLE_WORKS);
   const selectedQuery = result?.queries.find((query) => query.id === selection?.queryId) ?? null;
   const selectedBin = result?.bins.find((bin) => bin.key === selection?.binKey) ?? null;
   const selectedSeries = result?.series.find((series) => series.queryId === selection?.queryId) ?? null;
@@ -342,19 +353,26 @@ export default function Home() {
 
           <div className="artwork-grid" aria-busy={evidenceLoading}>
             {evidenceLoading && <p className="no-works">Loading evidence…</p>}
-            {!evidenceLoading && selectedItems.slice(0, MAX_VISIBLE_WORKS).map(({ artwork, slice }) => (
+            {!evidenceLoading && visibleItems.map(({ artwork, slice }) => (
               <ArtworkCard key={artwork.artworkId} artwork={artwork} slice={slice} />
             ))}
             {!evidenceLoading && selection && selectedItems.length === 0 && !loading && (
               <p className="no-works">No contributing works in this period. Context samples may be unavailable.</p>
             )}
           </div>
+          {!evidenceLoading && hiddenExampleCount > 0 && (
+            <button
+              className="more-examples"
+              type="button"
+              aria-expanded={showAllExamples}
+              onClick={() => setShowAllExamples((current) => !current)}
+            >
+              {showAllExamples
+                ? "Show fewer examples"
+                : `View ${hiddenExampleCount} more example${hiddenExampleCount === 1 ? "" : "s"}`}
+            </button>
+          )}
         </section>
-
-        <p className="source-note">
-          {error && result ? `${error} · ` : ""}
-          {result?.warnings[0] ?? "Results are relative to the named, versioned corpus."}
-        </p>
       </div>
     </main>
   );
