@@ -2,9 +2,11 @@
 
 import {
   type KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type WheelEvent as ReactWheelEvent,
+  useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type {
@@ -34,6 +36,26 @@ type HoveredPoint = {
   binIndex: number;
 } | null;
 
+type Viewport = {
+  start: number;
+  end: number;
+};
+
+type DragState = {
+  pointerId: number;
+  startX: number;
+  viewport: Viewport;
+  moved: boolean;
+};
+
+type PinchState = {
+  distance: number;
+  centerX: number;
+  anchor: number;
+  plotWidth: number;
+  viewport: Viewport;
+};
+
 type SeriesPlot = {
   item: SearchSeries;
   query: QueryDescriptor;
@@ -54,12 +76,13 @@ type EndLabel = {
 export const SERIES_COLORS = ["#1a73e8", "#d93025", "#188038", "#9334e6", "#e37400"];
 
 const WIDTH = 1120;
-const HEIGHT = 300;
+const HEIGHT = 260;
 const PAD_LEFT = 68;
 const PAD_RIGHT = 112;
-const PAD_TOP = 8;
-const PAD_BOTTOM = 32;
+const PAD_TOP = 4;
+const PAD_BOTTOM = 24;
 const LABEL_GAP = 17;
+const MIN_VISIBLE_BINS = 12;
 
 function formatValue(value: number, metric: MetricMetadata) {
   if (metric.unit === "lift") return `${value.toFixed(value < 10 ? 2 : 1)}×`;
@@ -75,6 +98,30 @@ function niceMaximum(value: number) {
   const normalized = value / magnitude;
   const step = [1, 2, 2.5, 5, 10].find((candidate) => normalized <= candidate) ?? 10;
   return step * magnitude;
+}
+
+function clampViewport(viewport: Viewport, totalBins: number): Viewport {
+  const maximum = Math.max(0, totalBins - 1);
+  if (maximum === 0) return { start: 0, end: 0 };
+  const minimumSpan = Math.min(MIN_VISIBLE_BINS - 1, maximum);
+  const span = Math.min(maximum, Math.max(minimumSpan, viewport.end - viewport.start));
+  let start = viewport.start;
+  if (start < 0) start = 0;
+  if (start + span > maximum) start = maximum - span;
+  return { start, end: start + span };
+}
+
+function zoomViewport(viewport: Viewport, factor: number, anchor: number, totalBins: number) {
+  const span = viewport.end - viewport.start;
+  const nextSpan = span * factor;
+  const anchorValue = viewport.start + span * anchor;
+  return clampViewport(
+    {
+      start: anchorValue - nextSpan * anchor,
+      end: anchorValue + nextSpan * (1 - anchor),
+    },
+    totalBins,
+  );
 }
 
 function layoutEndLabels(labels: Omit<EndLabel, "labelY">[], top: number, bottom: number) {
@@ -107,21 +154,49 @@ export function Timeline({
   onToggleSeries,
 }: TimelineProps) {
   const [hovered, setHovered] = useState<HoveredPoint>(null);
+  const baseBins = useMemo(() => timelineWindow(bins), [bins]);
+  const [viewport, setViewport] = useState<Viewport>(() => ({
+    start: 0,
+    end: Math.max(0, baseBins.length - 1),
+  }));
+  const [dragging, setDragging] = useState(false);
+  const queuedViewport = useRef<Viewport | null>(null);
+  const viewportFrame = useRef<number | null>(null);
+  const animationFrame = useRef<number | null>(null);
+  const drag = useRef<DragState | null>(null);
+  const pinch = useRef<PinchState | null>(null);
+  const pointers = useRef(new Map<number, number>());
   const queryById = useMemo(
     () => new Map(queries.map((query, index) => [query.id, { query, index }])),
     [queries],
   );
   const visibleSeries = series.filter((item) => !hiddenQueryIds.has(item.queryId));
 
-  if (!bins.length || !series.length) return null;
-  const displayBins = timelineWindow(bins);
+  useEffect(() => {
+    setViewport({ start: 0, end: Math.max(0, baseBins.length - 1) });
+    setHovered(null);
+  }, [baseBins.length, baseBins[0]?.key, baseBins.at(-1)?.key]);
+
+  useEffect(() => () => {
+    if (viewportFrame.current !== null) cancelAnimationFrame(viewportFrame.current);
+    if (animationFrame.current !== null) cancelAnimationFrame(animationFrame.current);
+  }, []);
+
+  if (!baseBins.length || !series.length) return null;
+  const boundedViewport = clampViewport(viewport, baseBins.length);
+  const displayOffset = Math.floor(boundedViewport.start);
+  const displayEnd = Math.ceil(boundedViewport.end);
+  const displayBins = baseBins.slice(displayOffset, displayEnd + 1);
 
   const chartWidth = WIDTH - PAD_LEFT - PAD_RIGHT;
   const chartHeight = HEIGHT - PAD_TOP - PAD_BOTTOM;
   const x = (index: number) =>
-    displayBins.length === 1
+    boundedViewport.end === boundedViewport.start
       ? PAD_LEFT + chartWidth / 2
-      : PAD_LEFT + (index / (displayBins.length - 1)) * chartWidth;
+      : PAD_LEFT +
+        ((displayOffset + index - boundedViewport.start) /
+          (boundedViewport.end - boundedViewport.start)) *
+          chartWidth;
   const largestValue = Math.max(
     metric.unit === "lift" ? 1 : 0,
     ...visibleSeries.flatMap((item) => item.points.map((point) => point.value)),
@@ -134,7 +209,7 @@ export function Timeline({
         : 1;
   const y = (value: number) => PAD_TOP + chartHeight - (Math.max(0, value) / yMax) * chartHeight;
   const yTicks = [0, 0.25, 0.5, 0.75, 1].map((tick) => tick * yMax);
-  const labelEvery = Math.max(1, Math.ceil(displayBins.length / 7));
+  const labelEvery = Math.max(1, Math.ceil((boundedViewport.end - boundedViewport.start + 1) / 7));
   const selectedBinIndex = selection
     ? displayBins.findIndex((bin) => bin.key === selection.binKey)
     : -1;
@@ -162,7 +237,8 @@ export function Timeline({
 
   const endLabels = layoutEndLabels(
     plots.flatMap((plot) => {
-      const endpoint = [...plot.plotted].reverse().find(({ point }) => point.value > 0) ?? plot.plotted.at(-1);
+      const visiblePoints = plot.plotted.filter(({ index }) => x(index) >= PAD_LEFT && x(index) <= WIDTH - PAD_RIGHT);
+      const endpoint = [...visiblePoints].reverse().find(({ point }) => point.value > 0) ?? visiblePoints.at(-1);
       if (!endpoint) return [];
       return [{
         plot,
@@ -175,21 +251,83 @@ export function Timeline({
     PAD_TOP + chartHeight - 8,
   );
 
-  function hoverFromPointer(
-    event: ReactPointerEvent<SVGRectElement> | ReactMouseEvent<SVGRectElement>,
-  ): HoveredPoint {
+  function stopViewportAnimation() {
+    if (animationFrame.current !== null) {
+      cancelAnimationFrame(animationFrame.current);
+      animationFrame.current = null;
+    }
+  }
+
+  function queueViewport(next: Viewport) {
+    queuedViewport.current = clampViewport(next, baseBins.length);
+    if (viewportFrame.current !== null) return;
+    viewportFrame.current = requestAnimationFrame(() => {
+      viewportFrame.current = null;
+      if (queuedViewport.current) setViewport(queuedViewport.current);
+      queuedViewport.current = null;
+    });
+  }
+
+  function animateViewport(next: Viewport) {
+    stopViewportAnimation();
+    const from = boundedViewport;
+    const target = clampViewport(next, baseBins.length);
+    const startedAt = performance.now();
+    const duration = 180;
+    const step = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const eased = 1 - (1 - progress) ** 3;
+      setViewport({
+        start: from.start + (target.start - from.start) * eased,
+        end: from.end + (target.end - from.end) * eased,
+      });
+      if (progress < 1) animationFrame.current = requestAnimationFrame(step);
+      else animationFrame.current = null;
+    };
+    animationFrame.current = requestAnimationFrame(step);
+  }
+
+  function zoomBy(factor: number, anchor = 0.5, animate = false) {
+    const next = zoomViewport(boundedViewport, factor, anchor, baseBins.length);
+    setHovered(null);
+    if (animate) animateViewport(next);
+    else queueViewport(next);
+  }
+
+  function resetViewport() {
+    animateViewport({ start: 0, end: Math.max(0, baseBins.length - 1) });
+    setHovered(null);
+  }
+
+  function plotGeometry(element: SVGRectElement) {
+    const svg = element.ownerSVGElement;
+    if (!svg) return null;
+    const bounds = svg.getBoundingClientRect();
+    return {
+      left: bounds.left + (PAD_LEFT / WIDTH) * bounds.width,
+      width: (chartWidth / WIDTH) * bounds.width,
+    };
+  }
+
+  function hoverFromPointer(event: ReactPointerEvent<SVGRectElement>): HoveredPoint {
     const svg = event.currentTarget.ownerSVGElement;
     if (!svg || plots.length === 0) return null;
     const bounds = svg.getBoundingClientRect();
     const pointerX = ((event.clientX - bounds.left) / bounds.width) * WIDTH;
     const pointerY = ((event.clientY - bounds.top) / bounds.height) * HEIGHT;
-    const binIndex = Math.max(
+    const absoluteIndex = Math.max(
       0,
       Math.min(
-        displayBins.length - 1,
-        Math.round(((pointerX - PAD_LEFT) / chartWidth) * (displayBins.length - 1)),
+        baseBins.length - 1,
+        Math.round(
+          boundedViewport.start +
+            ((pointerX - PAD_LEFT) / chartWidth) *
+              (boundedViewport.end - boundedViewport.start),
+        ),
       ),
     );
+    const binIndex = absoluteIndex - displayOffset;
+    if (binIndex < 0 || binIndex >= displayBins.length) return null;
     const candidates = plots.flatMap((plot) => {
       const point = plot.pointsByBin.get(displayBins[binIndex].key);
       return point ? [{ queryId: plot.item.queryId, distance: Math.abs(y(point.value) - pointerY) }] : [];
@@ -201,8 +339,139 @@ export function Timeline({
     return { queryId: closest.queryId, binIndex };
   }
 
+  function handlePointerDown(event: ReactPointerEvent<SVGRectElement>) {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    stopViewportAnimation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pointers.current.set(event.pointerId, event.clientX);
+    setHovered(null);
+    setDragging(true);
+
+    if (pointers.current.size === 1) {
+      drag.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        viewport: boundedViewport,
+        moved: false,
+      };
+      pinch.current = null;
+      return;
+    }
+
+    const positions = [...pointers.current.values()].slice(0, 2);
+    const geometry = plotGeometry(event.currentTarget);
+    if (!geometry) return;
+    const centerX = (positions[0] + positions[1]) / 2;
+    pinch.current = {
+      distance: Math.max(8, Math.abs(positions[1] - positions[0])),
+      centerX,
+      anchor: Math.max(0, Math.min(1, (centerX - geometry.left) / geometry.width)),
+      plotWidth: geometry.width,
+      viewport: boundedViewport,
+    };
+    drag.current = null;
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<SVGRectElement>) {
+    if (!pointers.current.has(event.pointerId)) {
+      if (!dragging) setHovered(hoverFromPointer(event));
+      return;
+    }
+    event.preventDefault();
+    pointers.current.set(event.pointerId, event.clientX);
+
+    if (pointers.current.size >= 2 && pinch.current) {
+      const positions = [...pointers.current.values()].slice(0, 2);
+      const currentDistance = Math.max(8, Math.abs(positions[1] - positions[0]));
+      const currentCenter = (positions[0] + positions[1]) / 2;
+      let next = zoomViewport(
+        pinch.current.viewport,
+        pinch.current.distance / currentDistance,
+        pinch.current.anchor,
+        baseBins.length,
+      );
+      const span = next.end - next.start;
+      const centerShift = ((currentCenter - pinch.current.centerX) / pinch.current.plotWidth) * span;
+      next = clampViewport(
+        { start: next.start - centerShift, end: next.end - centerShift },
+        baseBins.length,
+      );
+      queueViewport(next);
+      return;
+    }
+
+    if (drag.current?.pointerId !== event.pointerId) return;
+    const geometry = plotGeometry(event.currentTarget);
+    if (!geometry) return;
+    const pixelDelta = event.clientX - drag.current.startX;
+    const span = drag.current.viewport.end - drag.current.viewport.start;
+    const binDelta = (pixelDelta / geometry.width) * span;
+    if (Math.abs(pixelDelta) > 3) drag.current.moved = true;
+    queueViewport({
+      start: drag.current.viewport.start - binDelta,
+      end: drag.current.viewport.end - binDelta,
+    });
+  }
+
+  function finishPointer(event: ReactPointerEvent<SVGRectElement>, cancelled = false) {
+    const wasClick =
+      !cancelled &&
+      pointers.current.size === 1 &&
+      drag.current?.pointerId === event.pointerId &&
+      !drag.current.moved;
+    pointers.current.delete(event.pointerId);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    if (pointers.current.size === 1) {
+      const [pointerId, clientX] = pointers.current.entries().next().value as [number, number];
+      drag.current = {
+        pointerId,
+        startX: clientX,
+        viewport: queuedViewport.current ?? boundedViewport,
+        moved: true,
+      };
+      pinch.current = null;
+    } else if (pointers.current.size === 0) {
+      drag.current = null;
+      pinch.current = null;
+      setDragging(false);
+    }
+
+    if (wasClick) {
+      const next = hoverFromPointer(event);
+      if (next) onSelect({ queryId: next.queryId, binKey: displayBins[next.binIndex].key });
+    }
+  }
+
+  function handleWheel(event: ReactWheelEvent<SVGRectElement>) {
+    const geometry = plotGeometry(event.currentTarget);
+    if (!geometry) return;
+    event.preventDefault();
+    stopViewportAnimation();
+    const anchor = Math.max(0, Math.min(1, (event.clientX - geometry.left) / geometry.width));
+    const boundedDelta = Math.max(-120, Math.min(120, event.deltaY));
+    zoomBy(Math.exp(boundedDelta * 0.0022), anchor);
+  }
+
   function handleKeyboard(event: ReactKeyboardEvent<SVGRectElement>) {
     if (!plots.length) return;
+    if (event.key === "+" || event.key === "=") {
+      event.preventDefault();
+      zoomBy(0.68, 0.5, true);
+      return;
+    }
+    if (event.key === "-" || event.key === "_") {
+      event.preventDefault();
+      zoomBy(1.47, 0.5, true);
+      return;
+    }
+    if (event.key === "0" || event.key === "Home") {
+      event.preventDefault();
+      resetViewport();
+      return;
+    }
     const active = hovered ?? {
       queryId: plots.find((plot) => plot.item.queryId === selection?.queryId)?.item.queryId ?? plots[0].item.queryId,
       binIndex: selectedBinIndex >= 0 ? selectedBinIndex : displayBins.length - 1,
@@ -235,6 +504,10 @@ export function Timeline({
   const selectedPoint = selectedPlot && selectedBinIndex >= 0
     ? selectedPlot.pointsByBin.get(displayBins[selectedBinIndex].key) ?? null
     : null;
+  const firstVisibleBin = baseBins[Math.min(baseBins.length - 1, Math.ceil(boundedViewport.start))];
+  const lastVisibleBin = baseBins[Math.max(0, Math.floor(boundedViewport.end))];
+  const viewportChanged =
+    boundedViewport.start > 0.01 || boundedViewport.end < baseBins.length - 1 - 0.01;
 
   return (
     <div className="timeline-wrap" role="group" aria-label={`${metric.label} by time period`}>
@@ -245,6 +518,11 @@ export function Timeline({
         preserveAspectRatio="xMidYMid meet"
       >
         <title>{`${metric.label} for ${queries.map((query) => query.label).join(", ")}`}</title>
+        <defs>
+          <clipPath id="timeline-plot-clip">
+            <rect x={PAD_LEFT} y={PAD_TOP} width={chartWidth} height={chartHeight} />
+          </clipPath>
+        </defs>
         {yTicks.map((tick) => (
           <g key={tick}>
             <line
@@ -279,6 +557,8 @@ export function Timeline({
         )}
 
         {displayBins.map((bin, index) => (
+          x(index) >= PAD_LEFT &&
+          x(index) <= WIDTH - PAD_RIGHT &&
           (index % labelEvery === 0 || index === displayBins.length - 1) && (
             <text className="axis-label" key={bin.key} x={x(index)} y={HEIGHT - 17} textAnchor="middle">
               {formatTimelineYear(bin.start)}
@@ -286,14 +566,16 @@ export function Timeline({
           )
         ))}
 
-        {plots.map((plot) => (
-          <path
-            className={selection?.queryId === plot.item.queryId ? "timeline-line active" : "timeline-line"}
-            d={plot.path}
-            key={plot.item.queryId}
-            style={{ stroke: plot.color }}
-          />
-        ))}
+        <g clipPath="url(#timeline-plot-clip)">
+          {plots.map((plot) => (
+            <path
+              className={selection?.queryId === plot.item.queryId ? "timeline-line active" : "timeline-line"}
+              d={plot.path}
+              key={plot.item.queryId}
+              style={{ stroke: plot.color }}
+            />
+          ))}
+        </g>
 
         {selectedPlot && selectedPoint && selectedBinIndex >= 0 && !hovered && (
           <g aria-hidden="true">
@@ -387,20 +669,23 @@ export function Timeline({
         )}
 
         <rect
-          className="chart-interaction-layer"
+          className={dragging ? "chart-interaction-layer dragging" : "chart-interaction-layer"}
           x={PAD_LEFT}
           y={PAD_TOP}
           width={chartWidth}
           height={chartHeight}
           role="button"
           tabIndex={0}
-          aria-label="Explore chart values. Use arrow keys to move between periods and series, then press Enter to select evidence."
-          onPointerMove={(event) => setHovered(hoverFromPointer(event))}
-          onPointerLeave={() => setHovered(null)}
-          onClick={(event) => {
-            const next = hoverFromPointer(event);
-            if (next) onSelect({ queryId: next.queryId, binKey: displayBins[next.binIndex].key });
+          aria-label="Explore chart values. Drag to pan, use the mouse wheel or plus and minus keys to zoom, arrow keys to inspect values, and Enter to select evidence."
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={(event) => finishPointer(event)}
+          onPointerCancel={(event) => finishPointer(event, true)}
+          onPointerLeave={() => {
+            if (pointers.current.size === 0) setHovered(null);
           }}
+          onWheel={handleWheel}
+          onDoubleClick={resetViewport}
           onKeyDown={handleKeyboard}
           onBlur={() => setHovered(null)}
         />
@@ -437,7 +722,17 @@ export function Timeline({
             );
           })}
         </div>
-        <span className="timeline-hint">Move across the chart; click to inspect works</span>
+        <div className="timeline-tools">
+          <span className="viewport-range">
+            {formatTimelineYear(firstVisibleBin.start)}–{formatTimelineYear(lastVisibleBin.end)}
+          </span>
+          <span className="timeline-hint">Drag to pan · scroll to zoom</span>
+          <div className="zoom-buttons" aria-label="Chart zoom controls">
+            <button type="button" onClick={() => zoomBy(0.68, 0.5, true)} aria-label="Zoom in">+</button>
+            <button type="button" onClick={() => zoomBy(1.47, 0.5, true)} aria-label="Zoom out">−</button>
+            <button type="button" onClick={resetViewport} disabled={!viewportChanged}>Reset</button>
+          </div>
+        </div>
       </div>
     </div>
   );
