@@ -4,9 +4,12 @@ import {
   handleImageOptimization,
 } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { handleMetServiceRequest, type D1Database } from "./met-search";
 
 interface Env {
   ASSETS: { fetch(request: Request): Promise<Response> };
+  DB: D1Database;
+  MNEMOSYNE_IMPORT_TOKEN?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -24,6 +27,8 @@ interface ExecutionContext {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    const metResponse = await handleMetServiceRequest(request, env);
+    if (metResponse) return metResponse;
     if (url.pathname === "/_vinext/image") {
       return handleImageOptimization(
         request,
