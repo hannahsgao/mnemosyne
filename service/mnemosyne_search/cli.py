@@ -46,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="versioned prompt template containing {query}; repeat for an ensemble",
     )
     parser.add_argument("--prompt-version", default="art-concept-v1")
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default="auto",
+        help="embedding text-tower device; auto prefers CUDA, then Apple MPS",
+    )
     return parser
 
 
@@ -68,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             text_encoder = Siglip2TextEncoder(
                 artifacts.model_id,
                 revision=artifacts.model_version,
+                device=args.device,
                 local_files_only=not args.allow_model_download,
             )
         prompts = PromptEnsemble(

@@ -108,7 +108,7 @@ class Siglip2TextEncoder:
         model_id: str = "google/siglip2-base-patch16-224",
         *,
         revision: str = "main",
-        device: str = "cpu",
+        device: str = "auto",
         local_files_only: bool = False,
     ) -> None:
         try:
@@ -122,6 +122,19 @@ class Siglip2TextEncoder:
         self.model_id = model_id
         self.model_version = revision
         self._torch = torch
+        if device == "auto":
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
+        if device not in {"cpu", "cuda", "mps"}:
+            raise ValueError("device must be auto, cpu, cuda, or mps")
+        if device == "cuda" and not torch.cuda.is_available():
+            raise ValueError("CUDA was requested but is unavailable")
+        if device == "mps" and not torch.backends.mps.is_available():
+            raise ValueError("MPS was requested but is unavailable")
         self._device = device
         self._tokenizer = AutoTokenizer.from_pretrained(
             model_id, revision=revision, local_files_only=local_files_only
@@ -130,6 +143,10 @@ class Siglip2TextEncoder:
             model_id, revision=revision, local_files_only=local_files_only
         ).to(device)
         self._model.eval()
+
+    @property
+    def device(self) -> str:
+        return self._device
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         inputs = self._tokenizer(list(texts), padding=True, truncation=True, return_tensors="pt")

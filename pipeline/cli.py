@@ -11,6 +11,7 @@ from .build import CorpusBuildError, build_corpus
 from .dates import DateConfig
 from .embeddings import DeterministicTestEncoder, Siglip2LocalEncoder, build_embedding_index
 from .met import MET_API_BASE, build_met_corpus
+from .met_visual import DEFAULT_MAX_IMAGE_BYTES, prepare_met_visual_subset
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -83,6 +84,30 @@ def _parser() -> argparse.ArgumentParser:
     embed.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     embed.add_argument("--allow-model-download", action="store_true")
     embed.add_argument("--allow-unreviewed-images", action="store_true")
+
+    prepare_visual = subparsers.add_parser(
+        "prepare-met-visual",
+        help="prepare a deterministic public-domain Met image subset for embedding",
+    )
+    prepare_visual.add_argument("--met-corpus", type=Path, required=True)
+    prepare_visual.add_argument("--artifact-csv", type=Path, required=True)
+    prepare_visual.add_argument("--output-csv", type=Path, required=True)
+    prepare_visual.add_argument(
+        "--image-dir",
+        type=Path,
+        help="optional durable image cache; omit to stream pixels only while embedding",
+    )
+    prepare_visual.add_argument(
+        "--sample-size",
+        type=int,
+        default=0,
+        help="deterministic sample size; 0 indexes every eligible artwork",
+    )
+    prepare_visual.add_argument("--source-revision", required=True)
+    prepare_visual.add_argument("--seed", default="met-public-domain-visual-v1")
+    prepare_visual.add_argument("--workers", type=int, default=16)
+    prepare_visual.add_argument("--max-dimension", type=int, default=512)
+    prepare_visual.add_argument("--max-image-bytes", type=int, default=DEFAULT_MAX_IMAGE_BYTES)
     return parser
 
 
@@ -144,6 +169,26 @@ def main(argv: list[str] | None = None) -> int:
                 dtype=args.dtype,
                 batch_size=args.batch_size,
                 allow_unreviewed_images=args.allow_unreviewed_images,
+            )
+        elif args.command == "prepare-met-visual":
+            manifest = prepare_met_visual_subset(
+                args.met_corpus,
+                args.artifact_csv,
+                args.output_csv,
+                args.image_dir,
+                sample_size=args.sample_size,
+                source_revision=args.source_revision,
+                seed=args.seed,
+                workers=args.workers,
+                max_dimension=args.max_dimension,
+                max_image_bytes=args.max_image_bytes,
+                progress=lambda examined, prepared, total: print(
+                    f"examined={examined} prepared={prepared}/"
+                    f"{args.sample_size or total} "
+                    f"eligible={total}",
+                    file=sys.stderr,
+                    flush=True,
+                ),
             )
         else:
             return 2
