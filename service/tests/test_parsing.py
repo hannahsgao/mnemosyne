@@ -19,6 +19,10 @@ class QueryParsingTests(unittest.TestCase):
     def test_normalizes_unicode_and_whitespace(self) -> None:
         self.assertEqual(normalize_term("  ＨＯＲＳＥ\n study "), "horse study")
 
+    def test_matches_frontend_unicode_lowercase_semantics(self) -> None:
+        terms = parse_query("Straße, STRASSE")
+        self.assertEqual([term.normalized for term in terms], ["straße", "strasse"])
+
     def test_supports_doubled_quote_escape(self) -> None:
         terms = parse_query('"portrait of ""Ada"", seated", horse')
         self.assertEqual(terms[0].label, 'portrait of "Ada", seated')

@@ -9,7 +9,7 @@ import unittest
 
 from pipeline.met import build_met_corpus
 from mnemosyne_search.met_artifacts import MetKeywordArtifacts
-from mnemosyne_search.met_client import SqliteMetClient
+from mnemosyne_search.met_client import FixtureMetClient, SqliteMetClient
 from mnemosyne_search.met_service import METADATA_WARNING, MetKeywordConfig, MetKeywordSearchService
 from mnemosyne_search.models import SearchRequest
 from mnemosyne_search.parsing import parse_query
@@ -155,6 +155,39 @@ class MetKeywordSearchTests(unittest.TestCase):
         self.assertTrue(all(not card["imageUrl"] for card in cards))
         self.assertTrue(all(card["rawScore"] is None for card in cards))
         self.assertEqual(set(self.client.object_calls), {10, 11})
+
+    def test_separate_evidence_client_supplies_image_metadata(self) -> None:
+        evidence_client = FixtureMetClient(
+            {},
+            {
+                10: {
+                    "objectID": 10,
+                    "isPublicDomain": True,
+                    "primaryImageSmall": "https://images.example/10.jpg",
+                },
+                11: {
+                    "objectID": 11,
+                    "isPublicDomain": True,
+                    "primaryImageSmall": "https://images.example/11.jpg",
+                },
+            },
+        )
+        service = MetKeywordSearchService(
+            self.artifacts,
+            self.client,
+            evidence_client=evidence_client,
+            config=MetKeywordConfig(minimum_denominator=1, evidence_count=5),
+        )
+        response = service.search(
+            SearchRequest(query="horse", selected_bin_key="1880:1889")
+        )
+        cards = response["selectedEvidence"]["slices"]["randomContributors"]
+
+        self.assertEqual(
+            {card["imageUrl"] for card in cards},
+            {"https://images.example/10.jpg", "https://images.example/11.jpg"},
+        )
+        self.assertEqual(set(evidence_client.object_calls), {10, 11})
 
     def test_filter_recomputes_the_denominator_and_cache_key(self) -> None:
         unfiltered = self.service.search(SearchRequest(query="lion"))

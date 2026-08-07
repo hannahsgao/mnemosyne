@@ -35,8 +35,11 @@ embeddings. Pass a saved Met `hasImages` search response with `--image-ids` to
 mark image availability, or opt into a one-time snapshot with
 `--fetch-image-ids`. Image availability does not change the chart denominator.
 
-At runtime, `mnemosyne-search --met-keyword` opens the SQLite artifact read-only.
-There is no request-time Met API dependency.
+At runtime, `mnemosyne-search --met-keyword` opens the SQLite artifact read-only,
+so search and aggregation have no Met API dependency. The service uses the
+keyless object endpoint only for the small set of selected evidence cards whose
+image URLs are not stored in the corpus. `--met-offline-evidence` disables that
+optional lookup.
 
 ## Build an ArtiFact proof corpus
 

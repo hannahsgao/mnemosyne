@@ -9,7 +9,7 @@ from .artifacts import ArtifactBundle
 from .encoders import FixtureTextEncoder, Siglip2TextEncoder
 from .http import serve
 from .met_artifacts import MetKeywordArtifacts
-from .met_client import SEARCH_MODES, SqliteMetClient
+from .met_client import HttpMetClient, SEARCH_MODES, SqliteMetClient
 from .met_service import MetKeywordConfig, MetKeywordSearchService
 from .prompting import PromptEnsemble
 from .service import SearchService
@@ -31,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--met-search-mode", choices=sorted(SEARCH_MODES), default="broad")
     parser.add_argument(
+        "--met-offline-evidence",
+        action="store_true",
+        help="do not fetch image metadata for selected Met evidence cards",
+    )
+    parser.add_argument(
         "--allow-model-download",
         action="store_true",
         help="allow one-time model provisioning when the pinned revision is not cached",
@@ -48,9 +53,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.met_keyword:
         met_artifacts = MetKeywordArtifacts.load(args.artifacts)
+        search_client = SqliteMetClient(met_artifacts.keyword_index_path)
         service = MetKeywordSearchService(
             met_artifacts,
-            SqliteMetClient(met_artifacts.keyword_index_path),
+            search_client,
+            evidence_client=search_client if args.met_offline_evidence else HttpMetClient(),
             config=MetKeywordConfig(search_mode=args.met_search_mode),
         )
     else:

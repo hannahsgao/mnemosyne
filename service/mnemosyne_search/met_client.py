@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sqlite3
+import ssl
 from threading import RLock
 import time
 from typing import Any, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
+
+import certifi
 
 
 MET_API_BASE = "https://collectionapi.metmuseum.org/public/collection/v1"
@@ -118,6 +121,7 @@ class HttpMetClient:
         self.api_base = api_base.rstrip("/")
         self.timeout = timeout
         self.attempts = attempts
+        self._ssl_context = ssl.create_default_context(cafile=certifi.where())
         self._search_cache: dict[tuple[str, str], tuple[int, ...]] = {}
         self._object_cache: dict[int, Mapping[str, Any] | None] = {}
         self._lock = RLock()
@@ -167,7 +171,11 @@ class HttpMetClient:
         last_error: Exception | None = None
         for attempt in range(self.attempts):
             try:
-                with urlopen(request, timeout=self.timeout) as response:  # noqa: S310
+                with urlopen(  # noqa: S310
+                    request,
+                    timeout=self.timeout,
+                    context=self._ssl_context,
+                ) as response:
                     payload = json.load(response)
                 if not isinstance(payload, dict):
                     raise RuntimeError("Met API returned a non-object JSON response")

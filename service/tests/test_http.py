@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -21,6 +23,10 @@ FIXTURES = Path(__file__).parent / "fixtures"
 class HttpServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         artifacts = ArtifactBundle.load(FIXTURES)
+        self.temporary = tempfile.TemporaryDirectory()
+        image_path = Path(self.temporary.name) / "fixture.jpg"
+        image_path.write_bytes(b"fixture-image-bytes")
+        artifacts = replace(artifacts, image_paths={"fixture-000": image_path})
         encoder = FixtureTextEncoder.from_json(FIXTURES / "query-embeddings.json")
         service = SearchService(
             artifacts,
@@ -37,6 +43,7 @@ class HttpServiceTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
+        self.temporary.cleanup()
 
     def test_health_and_search_endpoints(self) -> None:
         with urllib.request.urlopen(f"{self.base_url}/healthz") as response:
@@ -64,6 +71,12 @@ class HttpServiceTests(unittest.TestCase):
             urllib.request.urlopen(request)
         self.assertEqual(caught.exception.code, 400)
         self.assertIn("empty series", caught.exception.read().decode())
+
+    def test_serves_manifest_backed_evidence_images(self) -> None:
+        with urllib.request.urlopen(f"{self.base_url}/v1/images/fixture-000") as response:
+            self.assertEqual(response.read(), b"fixture-image-bytes")
+            self.assertEqual(response.headers["Content-Type"], "image/jpeg")
+            self.assertIn("immutable", response.headers["Cache-Control"])
 
 
 if __name__ == "__main__":

@@ -72,20 +72,27 @@ class MetKeywordSearchService:
         artifacts: MetKeywordArtifacts,
         client: MetClient,
         *,
+        evidence_client: MetClient | None = None,
         config: MetKeywordConfig | None = None,
         cache: InMemorySeriesCache[MetSeriesComputation] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.client = client
+        self.evidence_client = evidence_client or client
         self.config = config or MetKeywordConfig()
         self.cache = cache or InMemorySeriesCache()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def close(self) -> None:
-        close = getattr(self.client, "close", None)
-        if callable(close):
-            close()
+        closed: set[int] = set()
+        for client in (self.client, self.evidence_client):
+            if id(client) in closed:
+                continue
+            closed.add(id(client))
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
 
     def health(self) -> dict[str, object]:
         backend = str(getattr(self.client, "backend", "met-keyword-provider"))
@@ -302,9 +309,33 @@ class MetKeywordSearchService:
         contributors, _ = self.artifacts.date_weights.rows_for_bin(
             computation.match_rows, bin_index
         )
+        image_contributors = np.asarray(
+            [
+                int(row)
+                for row in contributors
+                if self.artifacts.metadata[int(row)].get("publicDomain", False)
+                and self.artifacts.metadata[int(row)].get("imageAvailable", False)
+            ],
+            dtype=np.int64,
+        )
+        public_contributors = np.asarray(
+            [
+                int(row)
+                for row in contributors
+                if self.artifacts.metadata[int(row)].get("publicDomain", False)
+            ],
+            dtype=np.int64,
+        )
+        evidence_pool = (
+            image_contributors
+            if len(image_contributors)
+            else public_contributors
+            if len(public_contributors)
+            else contributors
+        )
         selected = _stable_sample(
-            contributors,
-            self.config.evidence_count,
+            evidence_pool,
+            min(self.config.evidence_count, len(evidence_pool)),
             f"met-evidence:{term.normalized}:{self.artifacts.bins[bin_index].key}",
         )
         cards = [self._evidence_card(row, bin_index) for row in selected]
@@ -326,7 +357,7 @@ class MetKeywordSearchService:
         item = self.artifacts.metadata[row]
         object_id = int(item["sourceId"])
         try:
-            detail = self.client.object(object_id) or {}
+            detail = self.evidence_client.object(object_id) or {}
         except RuntimeError:
             detail = {}
         public_domain = bool(item.get("publicDomain", False)) and bool(

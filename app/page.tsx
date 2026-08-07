@@ -23,8 +23,7 @@ const EVIDENCE_ORDER: EvidenceSliceName[] = [
   "randomDenominator",
 ];
 
-const EVIDENCE_LABELS: Record<EvidenceSliceName, string> = {
-  strongest: "Strong match",
+const EVIDENCE_LABELS: Partial<Record<EvidenceSliceName, string>> = {
   representative: "Representative",
   borderline: "Near threshold",
   randomContributors: "Contributing sample",
@@ -55,14 +54,19 @@ function selectedEvidenceItems(response: SearchResponse | null, selection: Chart
     return [];
   }
 
+  const slices = response.selectedEvidence.slices;
   const seen = new Set<string>();
-  return EVIDENCE_ORDER.flatMap((slice) =>
-    response.selectedEvidence!.slices[slice].flatMap((artwork) => {
-      if (seen.has(artwork.artworkId)) return [];
+  const selected: { artwork: EvidenceArtwork; slice: EvidenceSliceName }[] = [];
+  const largestSlice = Math.max(...EVIDENCE_ORDER.map((slice) => slices[slice].length));
+  for (let index = 0; index < largestSlice; index += 1) {
+    for (const slice of EVIDENCE_ORDER) {
+      const artwork = slices[slice][index];
+      if (!artwork || seen.has(artwork.artworkId)) continue;
       seen.add(artwork.artworkId);
-      return [{ artwork, slice }];
-    }),
-  );
+      selected.push({ artwork, slice });
+    }
+  }
+  return selected;
 }
 
 function ArtworkCard({ artwork, slice }: { artwork: EvidenceArtwork; slice: EvidenceSliceName }) {
@@ -80,7 +84,7 @@ function ArtworkCard({ artwork, slice }: { artwork: EvidenceArtwork; slice: Evid
         <strong title={artwork.title}>{artwork.title}</strong>
         <span title={artwork.artist}>{artwork.artist}</span>
         <small>{artwork.dateDisplay} ↗</small>
-        <em>{EVIDENCE_LABELS[slice]}</em>
+        {EVIDENCE_LABELS[slice] && <em>{EVIDENCE_LABELS[slice]}</em>}
       </div>
     </a>
   );
@@ -106,6 +110,8 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const requestId = useRef(0);
   const evidenceRequestId = useRef(0);
+  const searchAbort = useRef<AbortController | null>(null);
+  const evidenceAbort = useRef<AbortController | null>(null);
 
   async function search(nextQuery: string) {
     try {
@@ -117,6 +123,10 @@ export default function Home() {
 
     const currentRequest = ++requestId.current;
     evidenceRequestId.current += 1;
+    searchAbort.current?.abort();
+    evidenceAbort.current?.abort();
+    const controller = new AbortController();
+    searchAbort.current = controller;
     setInput(nextQuery.trim());
     setSubmittedQuery(nextQuery.trim());
     setLoading(true);
@@ -126,7 +136,9 @@ export default function Home() {
     setHiddenQueryIds(new Set());
 
     try {
-      const response = await fetch(buildSearchUrl(nextQuery.trim()));
+      const response = await fetch(buildSearchUrl(nextQuery.trim()), {
+        signal: controller.signal,
+      });
       const payload: unknown = await response.json();
       if (!response.ok) {
         const message =
@@ -147,6 +159,7 @@ export default function Home() {
       setResult(payload);
       setSelection(nextSelection);
     } catch (caught) {
+      if (caught instanceof DOMException && caught.name === "AbortError") return;
       if (requestId.current !== currentRequest) return;
       setError(caught instanceof Error ? caught.message : "Search failed.");
       setResult(null);
@@ -166,10 +179,15 @@ export default function Home() {
     }
 
     const currentRequest = ++evidenceRequestId.current;
+    evidenceAbort.current?.abort();
+    const controller = new AbortController();
+    evidenceAbort.current = controller;
     setEvidenceLoading(true);
     setError(null);
     try {
-      const response = await fetch(buildSearchUrl(submittedQuery, nextSelection));
+      const response = await fetch(buildSearchUrl(submittedQuery, nextSelection), {
+        signal: controller.signal,
+      });
       const payload: unknown = await response.json();
       if (!response.ok) {
         const message =
@@ -182,6 +200,7 @@ export default function Home() {
       if (evidenceRequestId.current !== currentRequest) return;
       setResult((current) => (current ? { ...current, selectedEvidence: payload.selectedEvidence } : current));
     } catch (caught) {
+      if (caught instanceof DOMException && caught.name === "AbortError") return;
       if (evidenceRequestId.current !== currentRequest) return;
       setError(caught instanceof Error ? caught.message : "Evidence could not be loaded.");
     } finally {
@@ -191,6 +210,10 @@ export default function Home() {
 
   useEffect(() => {
     void search(INITIAL_QUERY);
+    return () => {
+      searchAbort.current?.abort();
+      evidenceAbort.current?.abort();
+    };
     // The first query is intentional; subsequent searches are user-driven.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

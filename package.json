@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:sites": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
     "start": "next start",
     "check": "tsc --noEmit",
     "test": "node --test lib/*.test.ts"
@@ -16,9 +17,16 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.37.1",
     "@types/node": "24.10.0",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
-    "typescript": "6.0.3"
+    "@vitejs/plugin-react": "^6.0.2",
+    "@vitejs/plugin-rsc": "^0.5.26",
+    "react-server-dom-webpack": "^19.2.6",
+    "typescript": "6.0.3",
+    "vinext": "^1.0.0-beta.2",
+    "vite": "^8.0.13",
+    "wrangler": "^4.92.0"
   }
 }

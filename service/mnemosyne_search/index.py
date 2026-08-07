@@ -41,6 +41,33 @@ class NumpyFlatIPIndex:
         if self.embeddings.ndim != 2:
             raise ValueError("embeddings must be a matrix")
 
+    @staticmethod
+    def _top_k(
+        candidate_indices: np.ndarray, candidate_scores: np.ndarray, k: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Select exact top-k rows without fully sorting every score block."""
+
+        output_indices = np.empty((len(candidate_scores), k), dtype=np.int64)
+        output_scores = np.empty((len(candidate_scores), k), dtype=np.float32)
+        for query_index, scores in enumerate(candidate_scores):
+            indices = candidate_indices[query_index]
+            if len(scores) <= k:
+                selected = np.arange(len(scores), dtype=np.int64)
+            else:
+                partition = np.argpartition(-scores, k - 1)[:k]
+                cutoff = scores[partition].min()
+                better = np.flatnonzero(scores > cutoff)
+                equal = np.flatnonzero(scores == cutoff)
+                equal_order = np.argsort(indices[equal], kind="stable")
+                selected = np.concatenate(
+                    (better, equal[equal_order[: k - len(better)]])
+                )
+            order = np.lexsort((indices[selected], -scores[selected]))
+            selected = selected[order]
+            output_indices[query_index] = indices[selected]
+            output_scores[query_index] = scores[selected]
+        return output_indices, output_scores
+
     def search(
         self, queries: np.ndarray, k: int, *, eligible_indices: np.ndarray | None = None
     ) -> SearchHits:
@@ -51,6 +78,13 @@ class NumpyFlatIPIndex:
         if not 1 <= k <= candidate_count:
             raise ValueError("k must be between one and the eligible corpus size")
         eligible = None if eligible_indices is None else np.asarray(eligible_indices, dtype=np.int64)
+        if eligible is not None and (
+            eligible.ndim != 1
+            or np.any(eligible < 0)
+            or np.any(eligible >= self.embeddings.shape[0])
+            or len(np.unique(eligible)) != len(eligible)
+        ):
+            raise ValueError("eligible indices must be unique, one-dimensional corpus rows")
         best_indices = np.empty((len(query_rows), 0), dtype=np.int64)
         best_scores = np.empty((len(query_rows), 0), dtype=np.float32)
         for start in range(0, candidate_count, self.block_size):
@@ -68,9 +102,7 @@ class NumpyFlatIPIndex:
                 (best_indices, np.broadcast_to(block_indices, block_scores.shape)), axis=1
             )
             combined_scores = np.concatenate((best_scores, block_scores), axis=1)
-            order = np.argsort(-combined_scores, axis=1, kind="stable")[:, :k]
-            best_indices = np.take_along_axis(combined_indices, order, axis=1)
-            best_scores = np.take_along_axis(combined_scores, order, axis=1)
+            best_indices, best_scores = self._top_k(combined_indices, combined_scores, k)
         return SearchHits(indices=best_indices, scores=best_scores)
 
     def score(self, query: np.ndarray, indices: np.ndarray) -> np.ndarray:

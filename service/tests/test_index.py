@@ -28,6 +28,14 @@ class ExactIndexTests(unittest.TestCase):
         )
         self.assertEqual(hits.indices.tolist(), [[1, 2]])
 
+    def test_blocked_top_k_preserves_corpus_order_for_boundary_ties(self) -> None:
+        index = NumpyFlatIPIndex(
+            np.asarray([[1, 0], [1, 0], [1, 0], [0, 1]], dtype=np.float32)
+        )
+        index.block_size = 2
+        hits = index.search(np.asarray([[1, 0]], dtype=np.float32), 2)
+        self.assertEqual(hits.indices.tolist(), [[0, 1]])
+
     def test_factory_has_working_numpy_fallback(self) -> None:
         index = create_exact_index(self.embeddings, prefer_faiss=False)
         self.assertEqual(index.backend, "numpy-flat-ip")

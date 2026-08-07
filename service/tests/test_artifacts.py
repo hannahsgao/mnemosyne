@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,26 @@ from mnemosyne_search.artifacts import ArtifactBundle, SparseDateWeights
 
 
 class PipelineArtifactContractTests(unittest.TestCase):
+    def test_rejects_an_artifact_with_a_bad_checksum(self) -> None:
+        fixtures = Path(__file__).parent / "fixtures"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "bundle"
+            shutil.copytree(fixtures, root)
+            manifest_path = root / "build-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            embedding_path = root / "embeddings.json"
+            manifest["artifacts"] = [
+                {
+                    "path": "embeddings.json",
+                    "bytes": embedding_path.stat().st_size,
+                    "sha256": "0" * 64,
+                }
+            ]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                ArtifactBundle.load(root)
+
     def test_sparse_membership_counts_rows_and_distinct_clusters_in_one_pass(self) -> None:
         weights = SparseDateWeights(
             indptr=np.asarray([0, 2, 3], dtype=np.int64),

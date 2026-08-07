@@ -26,11 +26,13 @@ metadata_frequency[j,b] = matching_date_weight[j,b] / eligible_date_weight[b]
 ```
 
 The bounded per-series cache avoids repeating searches for concepts already
-seen. Evidence metadata also comes from the local database.
-`--met-search-mode broad` is the default; `title` and `tags` constrain matching
-to those catalogue fields. This metric is catalogue metadata frequency, not a
-claim about what is visible in each image. No Met API or user API key is used at
-request time.
+seen. Search and aggregation stay local; the service calls the keyless Met
+object endpoint only for selected evidence cards whose image URLs are absent
+from the artifact. `--met-offline-evidence` disables those lookups (such cards
+will show no image). `--met-search-mode broad` is the default; `title` and
+`tags` constrain matching to those catalogue fields. This metric is catalogue
+metadata frequency, not a claim about what is visible in each image. No user
+API key is required.
 
 ## Embedding mode
 
@@ -49,11 +51,13 @@ corpus.csv
 embeddings.npy
 date-weights.npz
 bin-denominators.csv
+embedded-images.manifest.csv
 model-manifest.json
 ```
 
 The loader validates shared row/bin dimensions, normalized date weights,
-precomputed denominators, corpus/model versions, and embedding dimensions. It
+precomputed denominators, corpus/model versions, embedding dimensions, and the
+declared artifact byte counts and SHA-256 checksums. It
 also accepts the checked-in JSON fixture representation under
 `service/tests/fixtures`; JSON embeddings and date weights are for small tests,
 not production deployments.
@@ -116,6 +120,11 @@ Content-Type: application/json
   "filters": {"institution": ["The Met", "AIC"]}
 }
 ```
+
+Local images recorded by the embedding manifest are available at
+`GET /v1/images/{artworkId}`. The web app proxies these through a same-origin,
+immutable-cache endpoint; arbitrary filesystem paths are never accepted from
+HTTP requests.
 
 Only `query` is required. Commas outside double quotes create independent
 series; normalized duplicates are removed in first-seen order, and one to five

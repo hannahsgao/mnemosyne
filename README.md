@@ -77,8 +77,9 @@ embeddings by default. An optional saved `hasImages` response can mark image
 availability with `--image-ids`; `--fetch-image-ids` is the explicit one-time
 network alternative. Copy `.env.example` to `.env.local`, set
 `MNEMOSYNE_SEARCH_MODE=artifact`, run `npm run dev`, and the web route will proxy
-to the service. Browser searches then require neither a Met API call nor a user
-API key.
+to the service. Search and aggregation remain local; by default the service uses
+the keyless Met object endpoint only to resolve image metadata for the selected
+evidence cards. Pass `--met-offline-evidence` to disable those lookups.
 
 The plotted value is `matching date weight / eligible date weight` for each
 bin. It measures the frequency of a term in Met catalogue metadata, not the

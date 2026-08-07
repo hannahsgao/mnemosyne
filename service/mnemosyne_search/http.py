@@ -89,7 +89,12 @@ def handler_for(service: SearchApplication) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # The client may have timed out or cancelled while a search was
+                # finishing; there is no response channel left to recover.
+                return
 
         def _file(self, path: Path) -> None:
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -99,8 +104,11 @@ def handler_for(service: SearchApplication) -> type[BaseHTTPRequestHandler]:
             self.send_header("Cache-Control", "public, max-age=31536000, immutable")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
-            with path.open("rb") as handle:
-                shutil.copyfileobj(handle, self.wfile, length=1024 * 1024)
+            try:
+                with path.open("rb") as handle:
+                    shutil.copyfileobj(handle, self.wfile, length=1024 * 1024)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
     return SearchHandler
 

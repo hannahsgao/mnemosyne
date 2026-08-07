@@ -31,6 +31,13 @@ test("deduplicates concepts after whitespace and case normalization", () => {
   ]);
 });
 
+test("matches backend Unicode lowercase semantics", () => {
+  assert.deepEqual(parseConceptQuery("Straße, STRASSE"), [
+    { label: "Straße", normalized: "straße" },
+    { label: "STRASSE", normalized: "strasse" },
+  ]);
+});
+
 test("rejects empty concepts, unterminated quotes, and more than five concepts", () => {
   for (const input of ["horse,,ship", 'horse, "still life', "a,b,c,d,e,f"]) {
     assert.throws(() => parseConceptQuery(input), QuerySyntaxError);
