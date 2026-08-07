@@ -61,6 +61,26 @@ export function pointForBin(series: SearchSeries, binKey: string) {
   return series.points.find((point) => point.binKey === binKey) ?? null;
 }
 
+/** Trim statistically thin leading/trailing bins from the default chart viewport. */
+export function timelineWindow(bins: TimeBin[]) {
+  const first = bins.findIndex(
+    (bin) => bin.belowMinimumDenominator === false && (bin.denominator ?? 0) > 0,
+  );
+  if (first < 0) return bins;
+  let last = bins.length - 1;
+  while (
+    last > first &&
+    (bins[last].belowMinimumDenominator !== false || (bins[last].denominator ?? 0) <= 0)
+  ) {
+    last -= 1;
+  }
+  return bins.slice(first, last + 1);
+}
+
+export function formatTimelineYear(year: number) {
+  return year < 0 ? `${Math.abs(year).toLocaleString("en-US")} BCE` : String(year);
+}
+
 export function peakSelection(response: SearchResponse, queryId?: string): ChartSelection | null {
   const selectedSeries =
     response.series.find((series) => series.queryId === queryId) ?? response.series[0];

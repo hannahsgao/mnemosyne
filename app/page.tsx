@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Timeline } from "../components/Timeline";
 import { MAX_QUERY_LENGTH, parseConceptQuery, QuerySyntaxError } from "../lib/query";
-import { peakSelection, pointForBin } from "../lib/timeline";
+import { formatTimelineYear, peakSelection, pointForBin, timelineWindow } from "../lib/timeline";
 import type {
   ChartSelection,
   EvidenceArtwork,
@@ -204,8 +204,9 @@ export default function Home() {
   const selectedSeries = result?.series.find((series) => series.queryId === selection?.queryId) ?? null;
   const selectedPoint =
     selectedSeries && selection ? pointForBin(selectedSeries, selection.binKey) : null;
-  const yearRange = result?.bins.length
-    ? `${result.bins[0].start}–${result.bins[result.bins.length - 1].end}`
+  const displayedBins = result?.bins.length ? timelineWindow(result.bins) : [];
+  const yearRange = displayedBins.length
+    ? `${formatTimelineYear(displayedBins[0].start)}–${formatTimelineYear(displayedBins[displayedBins.length - 1].end)}`
     : "";
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -243,7 +244,6 @@ export default function Home() {
     <main className="app-shell">
       <header className="topbar">
         <a className="wordmark" href="#top" aria-label="Mnemosyne home">Mnemosyne</a>
-        <span>Art through time</span>
       </header>
 
       <div className="workspace" id="top">
