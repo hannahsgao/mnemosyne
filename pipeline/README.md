@@ -6,10 +6,12 @@ crawls museum pages.
 
 ## Build the Met corpus
 
-The Met adapter is the no-embedding launch path. It selects records that are
-public domain, present in a snapshotted `hasImages` result, and dateable. It
-preserves the original `MetObjects.csv` and image-ID JSON with checksums, while
-precomputing the sparse date weights and denominators used by every query.
+The Met adapter is the no-embedding launch path. It selects every record with a
+usable normalized date inside the configured bounds; public-domain and image
+availability fields remain metadata rather than eligibility gates. It preserves
+the original `MetObjects.csv` with a checksum, precomputes sparse date weights
+and denominators, and builds a self-contained SQLite FTS5 index used by every
+query.
 
 ```bash
 git clone --depth 1 https://github.com/metmuseum/openaccess.git /path/to/met-openaccess
@@ -20,15 +22,21 @@ python3 -m pipeline build-met \
   --output /path/to/artifacts/met-openaccess-v1 \
   --corpus-version met-openaccess-v1 \
   --source-revision COPY_THE_COMMIT_PRINTED_ABOVE \
-  --retrieved-at 2026-08-03T00:00:00Z
+  --retrieved-at 2026-08-03T00:00:00Z \
+  --min-year -15000 \
+  --max-year 2029
 ```
 
-When `--image-ids` is omitted, the builder makes one keyless Met Collection API
-search for image-bearing object IDs and saves that response as
-`source-payloads/met-has-images.json`. For reruns, pass that saved file with
-`--image-ids` to reproduce the exact eligibility set without a network call.
-This build downloads neither image bytes nor embeddings; evidence image URLs
-are resolved only for the few cards a user selects.
+The output includes `met-search.sqlite3`, whose Porter/Unicode FTS index covers
+title, tags, artist, culture, medium, object type, classification, period,
+dynasty, geography, and department. The default build makes no network calls
+beyond obtaining the CSV separately and downloads neither images nor
+embeddings. Pass a saved Met `hasImages` search response with `--image-ids` to
+mark image availability, or opt into a one-time snapshot with
+`--fetch-image-ids`. Image availability does not change the chart denominator.
+
+At runtime, `mnemosyne-search --met-keyword` opens the SQLite artifact read-only.
+There is no request-time Met API dependency.
 
 ## Build an ArtiFact proof corpus
 

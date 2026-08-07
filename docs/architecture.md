@@ -67,15 +67,18 @@ Do not describe these bands as uncertainty about all historical art. They measur
 ### 2a. Met keyword launch path
 
 The first full-collection product path can avoid embeddings. Build a frozen
-corpus from the official Met Open Access CSV, restricted to public-domain
-records that appear in a snapshotted Collection API `hasImages` result and have
-a usable normalized date. Preserve both source payloads and their checksums.
+corpus from the official Met Open Access CSV, including every record with a
+usable normalized date inside explicit historical bounds. Preserve the source
+payload and its checksum. Keep public-domain and image-availability fields for
+rights-aware evidence, but do not use them as metadata-frequency eligibility
+gates.
 
-For each series query `j`, use the keyless Met Collection API to obtain matching
-object IDs, then intersect those IDs with the local eligible corpus before
-aggregation. Broad catalogue search is the default because title-only and
-tag-only search omit useful artist, culture, medium, and other metadata matches.
-Title and tag modes remain explicit diagnostic alternatives.
+During the one-time corpus build, create an immutable SQLite FTS5 index over
+title, tags, artist, culture, medium, object type, classification, period,
+dynasty, geography, and department. For each series query `j`, retrieve matching
+row IDs from this local index and aggregate them against the same frozen corpus.
+Broad catalogue search is the default; title-only and tag-only modes remain
+explicit diagnostic alternatives.
 
 Using the same precomputed date matrix `W` and denominator `D[b]`:
 
@@ -85,17 +88,16 @@ frequency[j,b]     = matching_mass[j,b] / D[b]
 ```
 
 This is option A: the direct, denominator-normalized frequency of catalogue
-matches. Every series uses the same corpus and bins, and API matches outside the
-frozen corpus never enter either numerator or evidence. Cache each normalized
-series independently. Fetch live object details only for a small deterministic
-set of evidence cards in the selected bin; those matches are examples, not a
-relevance ranking because the API does not expose scores.
+matches. Every series uses the same corpus and bins. Cache each normalized
+series independently. Read the small deterministic evidence set from the local
+SQLite metadata table; FTS row order is stable but these examples are not a
+semantic relevance ranking.
 
 The interface must label this **Met metadata frequency** and state that it
 measures catalogue language, not visual prevalence. Changes in cataloguing
 practice, tag coverage, digitization, public-domain eligibility, and collection
 composition can all move the line. This launch path needs no image downloads,
-model weights, embedding job, vector index, or API key.
+model weights, embedding job, vector index, API key, or request-time museum API.
 
 ### 3. Embed and index offline
 
@@ -206,8 +208,8 @@ Each card links to the museum record and includes its selected series, physical-
 ## Service boundaries
 
 ```text
-Official datasets -> corpus build -> Parquet + source payloads
-Met keyword IDs   -> local ID intersection -> sparse date aggregation
+Official datasets -> corpus build -> Parquet/CSV + source payloads
+Met metadata      -> local SQLite FTS5 -> sparse date aggregation
 Permitted images  -> embedding build -> matrix + FAISS index
 Canonical dates   -> date build -> sparse weights + denominators
 

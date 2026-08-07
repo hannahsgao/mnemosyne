@@ -4,13 +4,15 @@ Mnemosyne is a “Google Ngram for art”: search a visual idea, see how its sig
 
 The repository contains the interaction slice and two artifact-backed retrieval
 paths. The quickest full-corpus path uses the Met's official Open Access export
-and keyless Collection API:
+and a local SQLite FTS5 index:
 
-1. Build a versioned Met corpus of public-domain, image-backed, dateable works.
+1. Build a versioned corpus of every dateable Met record in the selected date range.
 2. Precompute normalized date weights and bin denominators once.
-3. Search Met metadata without an API key, intersect IDs locally, and plot the
+3. Build a full-text index over titles, tags, artists, cultures, media, object
+   types, classifications, periods, dynasties, geography, and departments.
+4. Search and aggregate entirely from local immutable artifacts, plotting the
    date-weighted matching share of each period.
-4. Compare one to five comma-separated concepts and inspect matching works.
+5. Compare one to five comma-separated concepts and inspect matching works.
 
 The embedding path remains available for visual-concept retrieval. It builds
 image embeddings and an exact FAISS `IndexFlatIP` index offline, then runs only
@@ -44,8 +46,8 @@ npm run build
 
 ## Run Art Ngram over the Met
 
-Clone a pinned copy of the Met's official Open Access data, build the local
-denominators, and start the keyword service:
+Clone a pinned copy of the Met's official Open Access data, build the local FTS
+and denominator artifacts once, and start the keyword service:
 
 ```bash
 git clone --depth 1 https://github.com/metmuseum/openaccess.git /path/to/met-openaccess
@@ -57,7 +59,9 @@ python3 -m pipeline build-met \
   --output /path/to/artifacts/met-openaccess-v1 \
   --corpus-version met-openaccess-v1 \
   --source-revision COPY_THE_COMMIT_PRINTED_ABOVE \
-  --retrieved-at 2026-08-03T00:00:00Z
+  --retrieved-at 2026-08-03T00:00:00Z \
+  --min-year -15000 \
+  --max-year 2029
 
 python3 -m pip install -e ./service
 mnemosyne-search \
@@ -67,11 +71,14 @@ mnemosyne-search \
   --port 8765
 ```
 
-`build-met` snapshots the Met API's image-bearing object IDs beside the source
-CSV. Pass `--image-ids /path/to/saved-search.json` to reuse an existing snapshot.
-No images or embeddings are downloaded for this mode. Copy `.env.example` to
-`.env.local`, set `MNEMOSYNE_SEARCH_MODE=artifact`, run `npm run dev`, and the
-web route will proxy to the service.
+`build-met` copies the source CSV, emits the date artifacts, and creates
+`met-search.sqlite3`. It does not call the Met API, download images, or build
+embeddings by default. An optional saved `hasImages` response can mark image
+availability with `--image-ids`; `--fetch-image-ids` is the explicit one-time
+network alternative. Copy `.env.example` to `.env.local`, set
+`MNEMOSYNE_SEARCH_MODE=artifact`, run `npm run dev`, and the web route will proxy
+to the service. Browser searches then require neither a Met API call nor a user
+API key.
 
 The plotted value is `matching date weight / eligible date weight` for each
 bin. It measures the frequency of a term in Met catalogue metadata, not the
@@ -127,8 +134,9 @@ Met keyword frequency and evidence, and embedding-based independent series.
 flowchart LR
   A[Official Met bulk data] --> B[Canonical artwork corpus]
   B --> C[Precomputed date weights and denominators]
-  Q[Comma-separated terms] --> D[Keyless Met metadata search]
-  D --> E[Local eligible-ID intersection]
+  B --> D[SQLite FTS5 metadata index]
+  Q[Comma-separated terms] --> D
+  D --> E[Local matching row IDs]
   C --> F[Aggregate by period]
   E --> F
   F --> G[Timeline]

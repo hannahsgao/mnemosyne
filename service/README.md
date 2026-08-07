@@ -5,7 +5,8 @@ visual retrieval. End users do not supply an API key in either mode.
 
 ## Met keyword mode
 
-This is the simplest full Met path and requires only NumPy at runtime:
+This is the simplest full Met path and requires only NumPy plus Python's
+built-in SQLite support at runtime:
 
 ```bash
 python3 -m pip install -e ./service
@@ -16,19 +17,20 @@ mnemosyne-search \
   --port 8765
 ```
 
-For each comma-separated concept the service makes one keyless Met Collection
-API search, intersects the returned object IDs with the local frozen corpus,
-and aggregates the precomputed date weights. The plotted value is:
+For each comma-separated concept the service searches the frozen artifact's
+SQLite FTS5 index, then aggregates the matching rows' precomputed date weights.
+The plotted value is:
 
 ```text
 metadata_frequency[j,b] = matching_date_weight[j,b] / eligible_date_weight[b]
 ```
 
 The bounded per-series cache avoids repeating searches for concepts already
-seen. The service fetches object details only for the selected evidence cards;
-those calls are cached as well. `--met-search-mode broad` is the default;
-`title` and `tags` constrain matching to those catalogue fields. This metric is
-catalogue metadata frequency, not a claim about what is visible in each image.
+seen. Evidence metadata also comes from the local database.
+`--met-search-mode broad` is the default; `title` and `tags` constrain matching
+to those catalogue fields. This metric is catalogue metadata frequency, not a
+claim about what is visible in each image. No Met API or user API key is used at
+request time.
 
 ## Embedding mode
 
