@@ -19,10 +19,13 @@ image embeddings and an exact FAISS `IndexFlatIP` index offline, then runs only
 the text encoder, exact retrieval, and global top-1% concentration lift at query
 time. The image tower never runs in a request.
 
-The web app also retains an explicit Art Institute of Chicago metadata demo.
-Its chart is explicitly labelled **relative result density**, not historical
-prevalence or concentration lift. `MNEMOSYNE_SEARCH_MODE` must name the active
-backend, so an unavailable artifact service cannot silently change the metric.
+The web app exposes a URL-backed **Keyword / Embedding** toggle. Keyword is the
+default; embedding mode is represented by `?searchMode=embedding`. In artifact
+mode the Next.js route dispatches only to the corresponding allowlisted local
+service URL, so one unavailable backend cannot silently substitute for the
+other. The Art Institute of Chicago demo supports keyword search only, and its
+chart is explicitly labelled **relative result density**, not historical
+prevalence or concentration lift.
 
 ## Run locally
 
@@ -76,10 +79,13 @@ mnemosyne-search \
 embeddings by default. An optional saved `hasImages` response can mark image
 availability with `--image-ids`; `--fetch-image-ids` is the explicit one-time
 network alternative. Copy `.env.example` to `.env.local`, set
-`MNEMOSYNE_SEARCH_MODE=artifact`, run `npm run dev`, and the web route will proxy
-to the service. Search and aggregation remain local; by default the service uses
-the keyless Met object endpoint only to resolve image metadata for the selected
-evidence cards. Pass `--met-offline-evidence` to disable those lookups.
+`MNEMOSYNE_SEARCH_MODE=artifact` and
+`MNEMOSYNE_KEYWORD_SEARCH_SERVICE_URL=http://127.0.0.1:8765/v1/search`, run
+`npm run dev`, and the web route will proxy keyword requests to the service.
+Search and aggregation remain local; by default the service uses the keyless Met
+object endpoint only to resolve image metadata for the selected evidence cards.
+Pass `--met-offline-evidence` to disable those lookups. The former
+`MNEMOSYNE_SEARCH_SERVICE_URL` remains a keyword-only compatibility fallback.
 
 The plotted value is `matching date weight / eligible date weight` for each
 bin. It measures the frequency of a term in Met catalogue metadata, not the
@@ -106,14 +112,22 @@ mnemosyne-search \
   --artifacts /path/to/embedding-bundle \
   --siglip2 \
   --host 127.0.0.1 \
-  --port 8765
+  --port 8766
 ```
 
-Copy `.env.example` to `.env.local`, set `MNEMOSYNE_SEARCH_MODE=artifact`, and
-run the web app. The Next.js route proxies to the service; model paths and
-service details stay server-side, and the end user supplies no API key. Local
-artifact images are served through the backend and a same-origin web route. See
-[`service/README.md`](service/README.md)
+To enable the toggle, run the keyword service on port 8765 and the embedding
+service on port 8766 at the same time, then configure:
+
+```dotenv
+MNEMOSYNE_SEARCH_MODE=artifact
+MNEMOSYNE_KEYWORD_SEARCH_SERVICE_URL=http://127.0.0.1:8765/v1/search
+MNEMOSYNE_EMBEDDING_SEARCH_SERVICE_URL=http://127.0.0.1:8766/v1/search
+```
+
+The Next.js route sends `searchMode=keyword|embedding` to the selected service;
+model paths and service details stay server-side, and the end user supplies no
+API key. Local artifact images are served through the originating backend and a
+mode-aware same-origin web route. See [`service/README.md`](service/README.md)
 for the complete artifact contract and fixture-only startup command.
 
 ## Verification

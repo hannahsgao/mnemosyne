@@ -1,5 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseConceptQuery, QuerySyntaxError } from "../../../lib/query";
+import {
+  buildBackendImageUrl,
+  configuredSearchServiceUrl,
+  DEFAULT_SEARCH_MODE,
+  isSearchMode,
+  searchServiceEnvironmentName,
+  type SearchMode,
+} from "../../../lib/search-mode";
 import { buildRelativeDensityPoints, buildSharedDecadeBins, decadeKey, decadeStart } from "../../../lib/timeline";
 import type {
   EvidenceArtwork,
@@ -42,7 +50,7 @@ const FIELDS = [
 ].join(",");
 const UPSTREAM_TIMEOUT_MS = 15_000;
 
-function rewriteBackendImageUrls(payload: unknown) {
+function rewriteBackendImageUrls(payload: unknown, searchMode: SearchMode) {
   if (!payload || typeof payload !== "object") return payload;
   const selected = (payload as { selectedEvidence?: unknown }).selectedEvidence;
   if (!selected || typeof selected !== "object") return payload;
@@ -59,7 +67,7 @@ function rewriteBackendImageUrls(payload: unknown) {
       }
       try {
         const artworkId = decodeURIComponent(artwork.imageUrl.slice("/v1/images/".length));
-        artwork.imageUrl = `/api/backend-image?${new URLSearchParams({ id: artworkId })}`;
+        artwork.imageUrl = buildBackendImageUrl(artworkId, searchMode);
       } catch {
         artwork.imageUrl = "";
       }
@@ -84,14 +92,21 @@ function emptyEvidenceSlices(): EvidenceSlices {
   };
 }
 
-async function proxySearchService(request: NextRequest, serviceUrl: string, query: string) {
+async function proxySearchService(
+  request: NextRequest,
+  serviceUrl: string,
+  serviceEnvironmentName: string,
+  query: string,
+  searchMode: SearchMode,
+) {
   let target: URL;
   try {
     target = new URL(serviceUrl);
+    if (target.protocol !== "http:" && target.protocol !== "https:") throw new Error();
     if (target.pathname === "/") target.pathname = "/v1/search";
   } catch {
     return NextResponse.json(
-      { error: "MNEMOSYNE_SEARCH_SERVICE_URL is not a valid URL." },
+      { error: `${serviceEnvironmentName} is not a valid URL.` },
       { status: 500 },
     );
   }
@@ -115,7 +130,7 @@ async function proxySearchService(request: NextRequest, serviceUrl: string, quer
     const contentType = response.headers.get("content-type") ?? "";
     if (contentType.includes("application/json")) {
       const body: unknown = await response.json();
-      return NextResponse.json(rewriteBackendImageUrls(body), {
+      return NextResponse.json(rewriteBackendImageUrls(body, searchMode), {
         status: response.status,
         headers: { "Cache-Control": response.headers.get("cache-control") ?? "no-store" },
       });
@@ -275,6 +290,14 @@ function buildPrototypeResponse(
 
 export async function GET(request: NextRequest) {
   const input = request.nextUrl.searchParams.get("q") ?? "";
+  const requestedSearchMode = request.nextUrl.searchParams.get("searchMode");
+  if (requestedSearchMode !== null && !isSearchMode(requestedSearchMode)) {
+    return NextResponse.json(
+      { error: "searchMode must be keyword or embedding." },
+      { status: 400 },
+    );
+  }
+  const searchMode = requestedSearchMode ?? DEFAULT_SEARCH_MODE;
   let parsed;
   try {
     parsed = parseConceptQuery(input);
@@ -286,23 +309,33 @@ export async function GET(request: NextRequest) {
   }
 
   const mode = process.env.MNEMOSYNE_SEARCH_MODE?.trim();
-  const serviceUrl = process.env.MNEMOSYNE_SEARCH_SERVICE_URL?.trim();
   if (mode === "artifact") {
+    const serviceUrl = configuredSearchServiceUrl(searchMode, process.env);
+    const environmentName = searchServiceEnvironmentName(searchMode);
     if (!serviceUrl) {
       return NextResponse.json(
         {
-          error: "Artifact search is selected, but MNEMOSYNE_SEARCH_SERVICE_URL is not configured.",
+          error: `${searchMode === "embedding" ? "Embedding" : "Keyword"} search is not configured. Set ${environmentName}.`,
         },
         { status: 503 },
       );
     }
-    return proxySearchService(request, serviceUrl, input);
+    return proxySearchService(request, serviceUrl, environmentName, input, searchMode);
   }
   if (mode !== "catalogue-demo") {
     return NextResponse.json(
       {
         error:
           "Search mode is not configured. Set MNEMOSYNE_SEARCH_MODE to artifact or catalogue-demo.",
+      },
+      { status: 503 },
+    );
+  }
+  if (searchMode === "embedding") {
+    return NextResponse.json(
+      {
+        error:
+          "Embedding search is unavailable in catalogue-demo mode. Configure both artifact search services to use the toggle.",
       },
       { status: 503 },
     );

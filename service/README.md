@@ -79,8 +79,13 @@ mnemosyne-search \
   --artifacts /path/to/model-artifacts \
   --siglip2 \
   --host 127.0.0.1 \
-  --port 8765
+  --port 8766
 ```
+
+The web toggle runs this process alongside the keyword process on port 8765.
+The Next.js route selects the allowlisted service URL from
+`searchMode=keyword|embedding`; the Python processes remain independent and do
+not need to load each other's artifact bundle.
 
 The pinned model revision must normally be provisioned in the service's local
 Hugging Face cache. `--allow-model-download` permits a one-time download at

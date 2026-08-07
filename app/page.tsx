@@ -3,6 +3,15 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Timeline } from "../components/Timeline";
 import { MAX_QUERY_LENGTH, parseConceptQuery, QuerySyntaxError } from "../lib/query";
+import {
+  buildSearchUrl,
+  DEFAULT_SEARCH_MODE,
+  pageUrlForSearchMode,
+  SEARCH_MODE_LABELS,
+  SEARCH_MODES,
+  searchModeFromUrl,
+  type SearchMode,
+} from "../lib/search-mode";
 import { formatTimelineYear, peakSelection, pointForBin, timelineWindow } from "../lib/timeline";
 import type {
   ChartSelection,
@@ -12,7 +21,13 @@ import type {
 } from "../lib/types";
 
 const INITIAL_QUERY = "horse, ship";
-const EXAMPLE_QUERIES = ["horse, ship", '"still life, fruit", flowers', "loneliness, joy"];
+const EXAMPLE_QUERIES = [
+  "industry, machine, skyscraper",
+  "railroad, automobile, airplane",
+  "photography, poster, newspaper",
+  "plastic, radio, television",
+  "war, revolution",
+];
 const INITIAL_VISIBLE_WORKS = 5;
 const MAX_VISIBLE_WORKS = 25;
 const EVIDENCE_ORDER: EvidenceSliceName[] = [
@@ -90,18 +105,17 @@ function ArtworkCard({ artwork, slice }: { artwork: EvidenceArtwork; slice: Evid
   );
 }
 
-function buildSearchUrl(query: string, selection?: ChartSelection) {
-  const params = new URLSearchParams({ q: query });
-  if (selection) {
-    params.set("evidenceQueryId", selection.queryId);
-    params.set("evidenceBinKey", selection.binKey);
-  }
-  return `/api/search?${params.toString()}`;
+function replacePageSearchMode(mode: SearchMode) {
+  const nextUrl = pageUrlForSearchMode(window.location.href, mode);
+  window.history.replaceState(window.history.state, "", nextUrl);
 }
 
 export default function Home() {
   const [input, setInput] = useState(INITIAL_QUERY);
   const [submittedQuery, setSubmittedQuery] = useState(INITIAL_QUERY);
+  const [searchMode, setSearchMode] = useState<SearchMode>(DEFAULT_SEARCH_MODE);
+  const [submittedSearchMode, setSubmittedSearchMode] =
+    useState<SearchMode>(DEFAULT_SEARCH_MODE);
   const [result, setResult] = useState<SearchResponse | null>(null);
   const [selection, setSelection] = useState<ChartSelection | null>(null);
   const [hiddenQueryIds, setHiddenQueryIds] = useState<Set<string>>(new Set());
@@ -114,7 +128,11 @@ export default function Home() {
   const searchAbort = useRef<AbortController | null>(null);
   const evidenceAbort = useRef<AbortController | null>(null);
 
-  async function search(nextQuery: string) {
+  async function search(
+    nextQuery: string,
+    nextMode: SearchMode = searchMode,
+    options: { syncInput?: boolean } = {},
+  ) {
     try {
       parseConceptQuery(nextQuery);
     } catch (caught) {
@@ -128,7 +146,10 @@ export default function Home() {
     evidenceAbort.current?.abort();
     const controller = new AbortController();
     searchAbort.current = controller;
-    setInput(nextQuery.trim());
+    replacePageSearchMode(nextMode);
+    setSearchMode(nextMode);
+    setSubmittedSearchMode(nextMode);
+    if (options.syncInput !== false) setInput(nextQuery.trim());
     setSubmittedQuery(nextQuery.trim());
     setLoading(true);
     setEvidenceLoading(false);
@@ -138,7 +159,7 @@ export default function Home() {
     setHiddenQueryIds(new Set());
 
     try {
-      const response = await fetch(buildSearchUrl(nextQuery.trim()), {
+      const response = await fetch(buildSearchUrl(nextQuery.trim(), nextMode), {
         signal: controller.signal,
       });
       const payload: unknown = await response.json();
@@ -193,9 +214,12 @@ export default function Home() {
     setEvidenceLoading(true);
     setError(null);
     try {
-      const response = await fetch(buildSearchUrl(submittedQuery, nextSelection), {
-        signal: controller.signal,
-      });
+      const response = await fetch(
+        buildSearchUrl(submittedQuery, submittedSearchMode, nextSelection),
+        {
+          signal: controller.signal,
+        },
+      );
       const payload: unknown = await response.json();
       if (!response.ok) {
         const message =
@@ -217,7 +241,10 @@ export default function Home() {
   }
 
   useEffect(() => {
-    void search(INITIAL_QUERY);
+    const initialMode = searchModeFromUrl(
+      new URLSearchParams(window.location.search).get("searchMode"),
+    );
+    void search(INITIAL_QUERY, initialMode);
     return () => {
       searchAbort.current?.abort();
       evidenceAbort.current?.abort();
@@ -248,7 +275,12 @@ export default function Home() {
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void search(input);
+    void search(input, searchMode);
+  }
+
+  function changeSearchMode(nextMode: SearchMode) {
+    if (nextMode === searchMode) return;
+    void search(submittedQuery, nextMode, { syncInput: false });
   }
 
   function activateSeries(queryId: string) {
@@ -287,27 +319,50 @@ export default function Home() {
         <section className="search-area" aria-labelledby="page-title">
           <div className="intro">
             <h1 id="page-title">Trace an idea through art history</h1>
-            <p>Compare up to five visual concepts. Separate lines with commas; quote a literal comma.</p>
+            <p>Compare up to five concepts using catalogue keywords or image embeddings. Separate lines with commas; quote a literal comma.</p>
           </div>
 
-          <form className="search-form" onSubmit={submit}>
-            <label className="sr-only" htmlFor="concept-search">Compare visual concepts</label>
-            <input
-              id="concept-search"
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              placeholder='horse, ship, "still life, fruit"'
-              maxLength={MAX_QUERY_LENGTH}
-              aria-describedby="query-help"
-            />
-            <button type="submit" disabled={loading}>{loading ? "Searching…" : "Search"}</button>
-          </form>
+          <div className="search-controls">
+            <form className="search-form" onSubmit={submit}>
+              <label className="sr-only" htmlFor="concept-search">Compare visual concepts</label>
+              <input
+                id="concept-search"
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                placeholder="industry, machine, skyscraper"
+                maxLength={MAX_QUERY_LENGTH}
+                aria-describedby="query-help"
+              />
+              <button type="submit" disabled={loading}>{loading ? "Searching…" : "Search"}</button>
+            </form>
 
-          <div className="query-row" id="query-help">
-            <span>Try:</span>
-            {EXAMPLE_QUERIES.map((example) => (
-              <button key={example} type="button" onClick={() => void search(example)}>{example}</button>
-            ))}
+            <div className="search-mode-row">
+              <span>Search by</span>
+              <span className="search-mode-toggle" role="group" aria-label="Search method">
+                {SEARCH_MODES.map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    aria-pressed={searchMode === mode}
+                    title={
+                      mode === "keyword"
+                        ? "Match words in catalogue metadata"
+                        : "Match visual concepts using image embeddings"
+                    }
+                    onClick={() => changeSearchMode(mode)}
+                  >
+                    {SEARCH_MODE_LABELS[mode]}
+                  </button>
+                ))}
+              </span>
+            </div>
+
+            <div className="query-row" id="query-help">
+              <span>Try:</span>
+              {EXAMPLE_QUERIES.map((example) => (
+                <button key={example} type="button" onClick={() => void search(example)}>{example}</button>
+              ))}
+            </div>
           </div>
         </section>
 

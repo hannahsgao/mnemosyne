@@ -1,14 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  configuredSearchServiceUrl,
+  DEFAULT_SEARCH_MODE,
+  isSearchMode,
+  searchServiceEnvironmentName,
+  type SearchMode,
+} from "../../../lib/search-mode";
 
 const MAX_ARTWORK_ID_LENGTH = 256;
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 10_000;
 
-function searchServiceOrigin() {
-  const raw = process.env.MNEMOSYNE_SEARCH_SERVICE_URL?.trim();
+function searchServiceOrigin(searchMode: SearchMode) {
+  const raw = configuredSearchServiceUrl(searchMode, process.env);
   if (!raw) return null;
   try {
-    return new URL(raw).origin;
+    const serviceUrl = new URL(raw);
+    if (serviceUrl.protocol !== "http:" && serviceUrl.protocol !== "https:") return null;
+    return serviceUrl.origin;
   } catch {
     return null;
   }
@@ -18,13 +27,26 @@ export async function GET(request: NextRequest) {
   if (process.env.MNEMOSYNE_SEARCH_MODE?.trim() !== "artifact") {
     return NextResponse.json({ error: "Artifact image serving is disabled." }, { status: 404 });
   }
+  const requestedSearchMode = request.nextUrl.searchParams.get("searchMode");
+  if (requestedSearchMode !== null && !isSearchMode(requestedSearchMode)) {
+    return NextResponse.json(
+      { error: "searchMode must be keyword or embedding." },
+      { status: 400 },
+    );
+  }
+  const searchMode = requestedSearchMode ?? DEFAULT_SEARCH_MODE;
   const artworkId = request.nextUrl.searchParams.get("id") ?? "";
   if (!artworkId || artworkId.length > MAX_ARTWORK_ID_LENGTH || /[\u0000-\u001f]/.test(artworkId)) {
     return NextResponse.json({ error: "Invalid artwork identifier." }, { status: 400 });
   }
-  const origin = searchServiceOrigin();
+  const origin = searchServiceOrigin(searchMode);
   if (!origin) {
-    return NextResponse.json({ error: "Artifact search service is not configured." }, { status: 503 });
+    return NextResponse.json(
+      {
+        error: `Artifact image service is not configured. Set ${searchServiceEnvironmentName(searchMode)}.`,
+      },
+      { status: 503 },
+    );
   }
 
   try {
