@@ -16,7 +16,6 @@ import { formatTimelineYear, peakSelection, pointForBin, timelineWindow } from "
 import type {
   ChartSelection,
   EvidenceArtwork,
-  EvidenceSliceName,
   SearchResponse,
 } from "../lib/types";
 
@@ -29,22 +28,6 @@ const EXAMPLE_QUERIES = [
   "war, revolution",
 ];
 const INITIAL_VISIBLE_WORKS = 5;
-const MAX_VISIBLE_WORKS = 25;
-const EVIDENCE_ORDER: EvidenceSliceName[] = [
-  "strongest",
-  "representative",
-  "borderline",
-  "randomContributors",
-  "bestNonContributors",
-  "randomDenominator",
-];
-
-const EVIDENCE_LABELS: Partial<Record<EvidenceSliceName, string>> = {
-  representative: "Representative",
-  borderline: "Near threshold",
-  bestNonContributors: "Best available match",
-  randomDenominator: "Corpus sample",
-};
 
 function isSearchResponse(value: unknown): value is SearchResponse {
   if (!value || typeof value !== "object") return false;
@@ -69,22 +52,17 @@ function selectedEvidenceItems(response: SearchResponse | null, selection: Chart
     return [];
   }
 
-  const slices = response.selectedEvidence.slices;
   const seen = new Set<string>();
-  const selected: { artwork: EvidenceArtwork; slice: EvidenceSliceName }[] = [];
-  const largestSlice = Math.max(...EVIDENCE_ORDER.map((slice) => slices[slice].length));
-  for (let index = 0; index < largestSlice; index += 1) {
-    for (const slice of EVIDENCE_ORDER) {
-      const artwork = slices[slice][index];
-      if (!artwork || seen.has(artwork.artworkId)) continue;
-      seen.add(artwork.artworkId);
-      selected.push({ artwork, slice });
-    }
+  const selected: EvidenceArtwork[] = [];
+  for (const artwork of response.selectedEvidence.slices.strongest) {
+    if (!artwork || seen.has(artwork.artworkId)) continue;
+    seen.add(artwork.artworkId);
+    selected.push(artwork);
   }
   return selected;
 }
 
-function ArtworkCard({ artwork, slice }: { artwork: EvidenceArtwork; slice: EvidenceSliceName }) {
+function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
   return (
     <a className="artwork-card" href={artwork.sourceRecordUrl} target="_blank" rel="noreferrer">
       <div className="artwork-image-wrap">
@@ -99,7 +77,6 @@ function ArtworkCard({ artwork, slice }: { artwork: EvidenceArtwork; slice: Evid
         <strong title={artwork.title}>{artwork.title}</strong>
         <span title={artwork.artist}>{artwork.artist}</span>
         <small>{artwork.dateDisplay} ↗</small>
-        {EVIDENCE_LABELS[slice] && <em>{EVIDENCE_LABELS[slice]}</em>}
       </div>
     </a>
   );
@@ -230,7 +207,14 @@ export default function Home() {
       }
       if (!isSearchResponse(payload)) throw new Error("The search service returned unsupported evidence.");
       if (evidenceRequestId.current !== currentRequest) return;
-      setResult((current) => (current ? { ...current, selectedEvidence: payload.selectedEvidence } : current));
+      setResult((current) =>
+        current
+          ? {
+              ...current,
+              selectedEvidence: payload.selectedEvidence,
+            }
+          : current,
+      );
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") return;
       if (evidenceRequestId.current !== currentRequest) return;
@@ -253,22 +237,32 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const selectedItems = useMemo(
+  const strongestEvidenceItems = useMemo(
     () => selectedEvidenceItems(result, selection),
     [result, selection],
   );
-  const visibleItemCount = showAllExamples ? MAX_VISIBLE_WORKS : INITIAL_VISIBLE_WORKS;
-  const visibleItems = selectedItems.slice(0, visibleItemCount);
+  const visibleItems = strongestEvidenceItems.slice(
+    0,
+    showAllExamples ? strongestEvidenceItems.length : INITIAL_VISIBLE_WORKS,
+  );
   const hiddenExampleCount = Math.max(
     0,
-    Math.min(selectedItems.length, MAX_VISIBLE_WORKS) - INITIAL_VISIBLE_WORKS,
+    strongestEvidenceItems.length - INITIAL_VISIBLE_WORKS,
   );
   const selectedQuery = result?.queries.find((query) => query.id === selection?.queryId) ?? null;
   const selectedBin = result?.bins.find((bin) => bin.key === selection?.binKey) ?? null;
   const selectedSeries = result?.series.find((series) => series.queryId === selection?.queryId) ?? null;
   const selectedPoint =
     selectedSeries && selection ? pointForBin(selectedSeries, selection.binKey) : null;
+  const currentEvidence = result?.selectedEvidence ?? null;
+  const selectedEvidence =
+    currentEvidence &&
+    currentEvidence.queryId === selection?.queryId &&
+    currentEvidence.binKey === selection?.binKey
+      ? currentEvidence
+      : null;
   const displayedBins = result?.bins.length ? timelineWindow(result.bins) : [];
+  const hasChartPoints = result?.series.some((series) => series.points.length > 0) ?? false;
   const yearRange = displayedBins.length
     ? `${formatTimelineYear(displayedBins[0].start)}–${formatTimelineYear(displayedBins[displayedBins.length - 1].end)}`
     : "";
@@ -292,6 +286,7 @@ export default function Home() {
         ? { queryId, binKey: selection.binKey }
         : peakSelection(result, queryId);
     if (candidate) void loadEvidence(candidate);
+    else setSelection(null);
   }
 
   function toggleSeries(queryId: string) {
@@ -373,13 +368,13 @@ export default function Home() {
               {!loading && yearRange && <span>{yearRange}</span>}
             </div>
             {result && !loading && (
-              <p>{result.queries.length} line{result.queries.length === 1 ? "" : "s"} · {result.corpus.label}</p>
+              <p>{result.queries.length} series · {result.corpus.label}</p>
             )}
           </div>
 
           {error && !result && <div className="message-state">{error} Try another search.</div>}
           {loading && <div className="chart-skeleton" />}
-          {!loading && result && result.bins.length > 0 && (
+          {!loading && result && result.bins.length > 0 && hasChartPoints && (
             <Timeline
               bins={result.bins}
               series={result.series}
@@ -395,6 +390,13 @@ export default function Home() {
           {!loading && !error && result && !result.bins.length && (
             <div className="message-state">No dated artworks were found for this search.</div>
           )}
+          {!loading && !error && result && result.bins.length > 0 && !hasChartPoints && (
+            <div className="message-state">
+              {submittedSearchMode === "embedding"
+                ? "No dated visual matches passed the score cutoff. Empty periods mean insufficient evidence, not zero historical prevalence."
+                : "No dated artworks matched these keywords."}
+            </div>
+          )}
         </section>
 
         <section className="evidence" aria-label="Evidence for the selected chart point">
@@ -404,18 +406,28 @@ export default function Home() {
                 ? "Select a line and period"
                 : `${selectedQuery.label} · ${selectedBin.label}`}
             </h2>
-            {selectedPoint && (
+            {selectedPoint && submittedSearchMode !== "embedding" && (
               <p>{selectedPoint.objectCount} contributing work{selectedPoint.objectCount === 1 ? "" : "s"}</p>
+            )}
+            {selectedPoint && submittedSearchMode === "embedding" && (
+              <p>
+                {selectedEvidence?.contributorCount ?? 0} visual match
+                {(selectedEvidence?.contributorCount ?? 0) === 1 ? "" : "es"}
+              </p>
             )}
           </div>
 
           <div className="artwork-grid" aria-busy={evidenceLoading}>
             {evidenceLoading && <p className="no-works">Loading evidence…</p>}
-            {!evidenceLoading && visibleItems.map(({ artwork, slice }) => (
-              <ArtworkCard key={artwork.artworkId} artwork={artwork} slice={slice} />
+            {!evidenceLoading && visibleItems.map((artwork) => (
+              <ArtworkCard key={artwork.artworkId} artwork={artwork} />
             ))}
-            {!evidenceLoading && selection && selectedItems.length === 0 && !loading && (
-              <p className="no-works">No contributing works in this period. Context samples may be unavailable.</p>
+            {!evidenceLoading && selection && strongestEvidenceItems.length === 0 && !loading && (
+              <p className="no-works">
+                {submittedSearchMode === "embedding"
+                  ? "No visual matches passed the score cutoff in this period."
+                  : "No keyword matches in this period."}
+              </p>
             )}
           </div>
           {!evidenceLoading && hiddenExampleCount > 0 && (
@@ -426,8 +438,8 @@ export default function Home() {
               onClick={() => setShowAllExamples((current) => !current)}
             >
               {showAllExamples
-                ? "Show fewer examples"
-                : `View ${hiddenExampleCount} more example${hiddenExampleCount === 1 ? "" : "s"}`}
+                ? "Show fewer matches"
+                : `Show ${hiddenExampleCount} more match${hiddenExampleCount === 1 ? "" : "es"}`}
             </button>
           )}
         </section>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import csv
 import json
 from pathlib import Path
@@ -173,7 +174,9 @@ class MetCorpusBuildTests(unittest.TestCase):
             self.assertAlmostEqual(float(weights.sum()), 4.0)
 
             index_path = output / manifest["files"]["keywordIndex"]
-            with sqlite3.connect(index_path) as connection:
+            # sqlite3.Connection's context manager only commits/rolls back; it
+            # does not close the connection when the block exits.
+            with closing(sqlite3.connect(index_path)) as connection:
                 self.assertEqual(connection.execute("SELECT count(*) FROM artworks").fetchone()[0], 4)
                 matches = connection.execute(
                     """

@@ -17,7 +17,14 @@ import type {
   SeriesPoint,
   TimeBin,
 } from "../lib/types";
-import { dataTimelineViewport, formatTimelineYear, timelineWindow } from "../lib/timeline";
+import {
+  contiguousTimelineRuns,
+  dataTimelineViewport,
+  formatTimelineYear,
+  monotoneTimelinePath,
+  timelineRenderRuns,
+  timelineWindow,
+} from "../lib/timeline";
 
 type TimelineProps = {
   bins: TimeBin[];
@@ -67,6 +74,7 @@ type SeriesPlot = {
   color: string;
   pointsByBin: Map<string, SeriesPoint>;
   plotted: { point: SeriesPoint; index: number }[];
+  isolated: { point: SeriesPoint; index: number }[];
   path: string;
 };
 
@@ -78,7 +86,7 @@ type EndLabel = {
   labelY: number;
 };
 
-export const SERIES_COLORS = ["#1a73e8", "#d93025", "#188038", "#9334e6", "#e37400"];
+export const SERIES_COLORS = ["#1a73e8", "#d93025", "#188038", "#9334e6", "#a85b00"];
 
 const DEFAULT_WIDTH = 1120;
 const DEFAULT_HEIGHT = 440;
@@ -240,28 +248,39 @@ export function Timeline({
   const displayOffset = Math.floor(boundedViewport.start);
   const displayEnd = Math.ceil(boundedViewport.end);
   const displayBins = baseBins.slice(displayOffset, displayEnd + 1);
+  const geometryOffset = Math.max(0, displayOffset - 1);
+  const geometryEnd = Math.min(baseBins.length - 1, displayEnd + 1);
+  const geometryBins = baseBins.slice(geometryOffset, geometryEnd + 1);
 
   const chartWidth = viewWidth - padLeft - padRight;
   const chartHeight = viewHeight - padTop - padBottom;
-  const x = (index: number) =>
+  const xAbsolute = (absoluteIndex: number) =>
     boundedViewport.end === boundedViewport.start
       ? padLeft + chartWidth / 2
       : padLeft +
-        ((displayOffset + index - boundedViewport.start) /
+        ((absoluteIndex - boundedViewport.start) /
           (boundedViewport.end - boundedViewport.start)) *
           chartWidth;
-  const displayBinKeys = new Set(displayBins.map((bin) => bin.key));
+  const x = (index: number) => xAbsolute(displayOffset + index);
+  const reliableBinKeys = new Set(
+    baseBins
+      .filter((bin) => bin.belowMinimumDenominator !== true)
+      .map((bin) => bin.key),
+  );
+  const reliableDisplayIndices = displayBins.flatMap((bin, index) =>
+    bin.belowMinimumDenominator === true ? [] : [index],
+  );
   const largestValue = Math.max(
     metric.unit === "lift" ? 1 : 0,
-    ...visibleSeries.flatMap((item) =>
+    ...series.flatMap((item) =>
       item.points
-        .filter((point) => displayBinKeys.has(point.binKey))
+        .filter((point) => reliableBinKeys.has(point.binKey))
         .map((point) => point.value),
     ),
   );
   const yMax =
     metric.unit === "lift"
-      ? niceMaximum(Math.max(1.2, largestValue * 1.04))
+      ? niceMaximum(Math.max(1.2, largestValue))
       : metric.unit === "frequency" && largestValue > 0
         ? niceMaximum(largestValue * 1.04)
         : 1;
@@ -282,12 +301,29 @@ export function Timeline({
     const queryEntry = queryById.get(item.queryId);
     if (!queryEntry) return [];
     const pointsByBin = new Map(item.points.map((point) => [point.binKey, point]));
-    const plotted = displayBins.flatMap((bin, index) => {
-      const point = pointsByBin.get(bin.key);
-      return point ? [{ point, index }] : [];
+    const plotted = contiguousTimelineRuns(displayBins, item.points).flat();
+    const fillReliableMissingWithZero =
+      metric.id === "score-qualified-visual-concentration-lift";
+    const renderRuns = timelineRenderRuns(geometryBins, item.points, {
+      fillReliableMissingWithZero,
+      suppressedBinKeys: item.suppressedBinKeys,
     });
-    const path = plotted
-      .map(({ point, index }, pointIndex) => `${pointIndex === 0 ? "M" : "L"}${x(index)} ${y(point.value)}`)
+    const isolated = renderRuns.flatMap((run) => {
+      const sample = run.length === 1 ? run[0] : null;
+      return sample?.point
+        ? [{
+            point: sample.point,
+            index: geometryOffset + sample.index - displayOffset,
+          }]
+        : [];
+    });
+    const path = renderRuns
+      .map((run) => monotoneTimelinePath(
+        run.map((sample) => ({
+          x: xAbsolute(geometryOffset + sample.index),
+          y: y(sample.value),
+        })),
+      ))
       .join(" ");
     return [{
       item,
@@ -295,6 +331,7 @@ export function Timeline({
       color: SERIES_COLORS[queryEntry.index % SERIES_COLORS.length],
       pointsByBin,
       plotted,
+      isolated,
       path,
     }];
   });
@@ -394,6 +431,7 @@ export function Timeline({
     );
     const binIndex = absoluteIndex - displayOffset;
     if (binIndex < 0 || binIndex >= displayBins.length) return null;
+    if (displayBins[binIndex].belowMinimumDenominator === true) return null;
     const candidates = plots.flatMap((plot) => {
       const point = plot.pointsByBin.get(displayBins[binIndex].key);
       return point ? [{ queryId: plot.item.queryId, distance: Math.abs(y(point.value) - pointerY) }] : [];
@@ -512,6 +550,9 @@ export function Timeline({
   }
 
   function handleWheel(event: ReactWheelEvent<SVGRectElement>) {
+    // Do not turn ordinary page scrolling into an unexpected chart zoom.
+    // Trackpad pinch gestures set ctrlKey; explicit buttons remain available.
+    if (!event.ctrlKey && !event.metaKey) return;
     const geometry = plotGeometry(event.currentTarget);
     if (!geometry) return;
     event.preventDefault();
@@ -538,22 +579,68 @@ export function Timeline({
       resetViewport();
       return;
     }
-    const active = hovered ?? {
-      queryId: plots.find((plot) => plot.item.queryId === selection?.queryId)?.item.queryId ?? plots[0].item.queryId,
-      binIndex: selectedBinIndex >= 0 ? selectedBinIndex : displayBins.length - 1,
+    const supportedIndices = (queryId: string) => {
+      const plot = plots.find((candidate) => candidate.item.queryId === queryId);
+      if (!plot) return [];
+      return reliableDisplayIndices.filter((index) =>
+        plot.pointsByBin.has(displayBins[index].key),
+      );
+    };
+    const navigablePlots = plots.filter(
+      (plot) => supportedIndices(plot.item.queryId).length > 0,
+    );
+    if (!navigablePlots.length) return;
+    const hoveredPlot = hovered
+      ? navigablePlots.find((plot) => plot.item.queryId === hovered.queryId)
+      : null;
+    const selectedNavigablePlot = selection
+      ? navigablePlots.find((plot) => plot.item.queryId === selection.queryId)
+      : null;
+    const activePlot = hoveredPlot ?? selectedNavigablePlot ?? navigablePlots[0];
+    const activeIndices = supportedIndices(activePlot.item.queryId);
+    const hoveredIndexIsSupported =
+      hovered?.queryId === activePlot.item.queryId && activeIndices.includes(hovered.binIndex);
+    const selectedIndexIsSupported =
+      selection?.queryId === activePlot.item.queryId && activeIndices.includes(selectedBinIndex);
+    const active = {
+      queryId: activePlot.item.queryId,
+      binIndex: hoveredIndexIsSupported
+        ? hovered.binIndex
+        : selectedIndexIsSupported
+          ? selectedBinIndex
+          : activeIndices.at(-1)!,
     };
     let next = active;
-    if (event.key === "ArrowLeft") next = { ...active, binIndex: Math.max(0, active.binIndex - 1) };
+    if (event.key === "ArrowLeft") {
+      const previous = activeIndices.findLast((index) => index < active.binIndex);
+      next = { ...active, binIndex: previous ?? active.binIndex };
+    }
     else if (event.key === "ArrowRight") {
-      next = { ...active, binIndex: Math.min(displayBins.length - 1, active.binIndex + 1) };
+      const following = activeIndices.find((index) => index > active.binIndex);
+      next = { ...active, binIndex: following ?? active.binIndex };
     }
     else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-      const currentIndex = Math.max(0, plots.findIndex((plot) => plot.item.queryId === active.queryId));
+      const currentIndex = Math.max(
+        0,
+        navigablePlots.findIndex((plot) => plot.item.queryId === active.queryId),
+      );
       const direction = event.key === "ArrowUp" ? -1 : 1;
-      const nextIndex = (currentIndex + direction + plots.length) % plots.length;
-      next = { ...active, queryId: plots[nextIndex].item.queryId };
+      const nextIndex =
+        (currentIndex + direction + navigablePlots.length) % navigablePlots.length;
+      const nextQueryId = navigablePlots[nextIndex].item.queryId;
+      const nextIndices = supportedIndices(nextQueryId);
+      const closestIndex = nextIndices.reduce((best, candidate) => {
+        const candidateDistance = Math.abs(candidate - active.binIndex);
+        const bestDistance = Math.abs(best - active.binIndex);
+        return candidateDistance < bestDistance ||
+          (candidateDistance === bestDistance && candidate < best)
+          ? candidate
+          : best;
+      });
+      next = { queryId: nextQueryId, binIndex: closestIndex };
     } else if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
+      if (!activePlot.pointsByBin.has(displayBins[active.binIndex].key)) return;
       onSelect({ queryId: active.queryId, binKey: displayBins[active.binIndex].key });
       return;
     } else return;
@@ -561,15 +648,26 @@ export function Timeline({
     setHovered(next);
   }
 
-  const hoverBin = hovered ? displayBins[hovered.binIndex] : null;
+  const hoverBin =
+    hovered && displayBins[hovered.binIndex]?.belowMinimumDenominator !== true
+      ? displayBins[hovered.binIndex]
+      : null;
   const hoverPlot = hovered ? plots.find((plot) => plot.item.queryId === hovered.queryId) : null;
   const hoverPoint = hoverBin && hoverPlot ? hoverPlot.pointsByBin.get(hoverBin.key) ?? null : null;
   const hoverX = hovered ? x(hovered.binIndex) : 0;
   const hoverY = hoverPoint ? y(hoverPoint.value) : 0;
   const selectedPlot = selection ? plots.find((plot) => plot.item.queryId === selection.queryId) : null;
-  const selectedPoint = selectedPlot && selectedBinIndex >= 0
+  const selectedPoint = selectedPlot &&
+    selectedBinIndex >= 0 &&
+    displayBins[selectedBinIndex].belowMinimumDenominator !== true
     ? selectedPlot.pointsByBin.get(displayBins[selectedBinIndex].key) ?? null
     : null;
+  const highlightedQueryId = hovered?.queryId ?? selection?.queryId ?? null;
+  const renderPlots = [...plots].sort((left, right) => {
+    if (left.item.queryId === highlightedQueryId) return 1;
+    if (right.item.queryId === highlightedQueryId) return -1;
+    return 0;
+  });
   const firstVisibleBin = baseBins[Math.min(baseBins.length - 1, Math.ceil(boundedViewport.start))];
   const lastVisibleBin = baseBins[Math.max(0, Math.floor(boundedViewport.end))];
   const viewportChanged =
@@ -635,13 +733,28 @@ export function Timeline({
         ))}
 
         <g clipPath="url(#timeline-plot-clip)">
-          {plots.map((plot) => (
-            <path
-              className={selection?.queryId === plot.item.queryId ? "timeline-line active" : "timeline-line"}
-              d={plot.path}
-              key={plot.item.queryId}
-              style={{ stroke: plot.color }}
-            />
+          {renderPlots.map((plot) => (
+            <g key={plot.item.queryId}>
+              <path
+                className={highlightedQueryId === plot.item.queryId ? "timeline-line active" : "timeline-line"}
+                d={plot.path}
+                style={{ stroke: plot.color }}
+              />
+              {plot.isolated.map(({ point, index }) => (
+                <circle
+                  className={
+                    highlightedQueryId === plot.item.queryId
+                      ? "timeline-point active"
+                      : "timeline-point"
+                  }
+                  cx={x(index)}
+                  cy={y(point.value)}
+                  key={point.binKey}
+                  r={highlightedQueryId === plot.item.queryId ? "4" : "3.2"}
+                  style={{ fill: plot.color }}
+                />
+              ))}
+            </g>
           ))}
         </g>
 
@@ -744,7 +857,7 @@ export function Timeline({
           height={chartHeight}
           role="button"
           tabIndex={0}
-          aria-label="Explore chart values. Drag to pan, use the mouse wheel or plus and minus keys to zoom, arrow keys to inspect values, and Enter to select evidence."
+          aria-label="Explore chart values. Drag to pan, pinch or use the plus and minus keys to zoom, use arrow keys to inspect values, and press Enter to select evidence."
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={(event) => finishPointer(event)}
@@ -801,6 +914,7 @@ export function Timeline({
           </div>
         </div>
       </div>
+      {metric.description && <p className="timeline-note">{metric.description}</p>}
     </div>
   );
 }

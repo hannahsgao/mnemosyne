@@ -86,9 +86,12 @@ class SeriesJSON(TypedDict):
     queryId: str
     k: int
     threshold: float | None
+    candidateK: NotRequired[int]
+    candidateThreshold: NotRequired[float | None]
     lowSignal: bool | None
     diagnostics: DiagnosticsJSON
     points: list[PointJSON]
+    suppressedBinKeys: NotRequired[list[str]]
     cacheKey: str
     totalMatches: NotRequired[int]
 
@@ -127,6 +130,9 @@ class EvidenceSlicesJSON(TypedDict):
 class SelectedEvidenceJSON(TypedDict):
     queryId: str
     binKey: str
+    percentile: NotRequired[float | None]
+    threshold: NotRequired[float | None]
+    contributorCount: NotRequired[int]
     slices: EvidenceSlicesJSON
 
 
@@ -138,7 +144,7 @@ class SearchResponse(TypedDict):
     metric: MetricJSON
     bins: list[BinJSON]
     series: list[SeriesJSON]
-    selectedEvidence: SelectedEvidenceJSON
+    selectedEvidence: SelectedEvidenceJSON | None
     warnings: list[str]
     generatedAt: str
 

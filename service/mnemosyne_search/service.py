@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Callable, Sequence
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import numpy as np
 
@@ -32,22 +32,64 @@ from .prompting import EncodedSeries, PromptEnsemble
 
 
 SCHEMA_VERSION = "mnemosyne.search.v1"
-METRIC_ID = "global-top-percentile-concentration-lift"
+METRIC_ID = "score-qualified-visual-concentration-lift"
+
+
+def _display_image_url(raw_url: object) -> str:
+    """Use a model/display-sized Met derivative instead of a huge original."""
+
+    url = str(raw_url or "")
+    if not url:
+        return ""
+    parsed = urlsplit(url)
+    if parsed.hostname == "images.metmuseum.org" and "/original/" in parsed.path:
+        parsed = parsed._replace(path=parsed.path.replace("/original/", "/web-large/", 1))
+    parsed = parsed._replace(path=quote(parsed.path, safe="/%:@"))
+    return urlunsplit(parsed)
+
+
+def _source_record_url(raw_url: object) -> str:
+    url = str(raw_url or "")
+    if not url:
+        return ""
+    parsed = urlsplit(url)
+    if parsed.scheme == "http" and parsed.hostname in {"metmuseum.org", "www.metmuseum.org"}:
+        parsed = parsed._replace(scheme="https")
+    return urlunsplit(parsed)
 
 
 @dataclass(frozen=True)
 class SearchConfig:
     percentile: float = 0.01
-    metric_version: str = "v1-p01"
+    metric_version: str = "v5-fixed64-score125-cap001-cluster2"
+    evidence_percentile: float = 0.001
+    minimum_evidence_score: float | None = 0.125
     minimum_denominator: float = 20.0
+    minimum_evidence_clusters: int = 3
+    minimum_bin_evidence_clusters: int = 2
     minimum_standardized_separation: float = 1.0
     minimum_prompt_jaccard: float = 0.25
     control_sample_size: int = 128
-    evidence_per_slice: int = 3
+    evidence_per_slice: int = 8
 
     def __post_init__(self) -> None:
         if not 0 < self.percentile <= 1:
             raise ValueError("percentile must be in (0, 1]")
+        if not 0 < self.evidence_percentile <= self.percentile:
+            raise ValueError("evidence_percentile must be in (0, percentile]")
+        if self.minimum_evidence_score is not None and (
+            not math.isfinite(self.minimum_evidence_score)
+            or not -1 <= self.minimum_evidence_score <= 1
+        ):
+            raise ValueError("minimum_evidence_score must be a finite cosine in [-1, 1]")
+        if self.minimum_evidence_clusters < 1:
+            raise ValueError("minimum_evidence_clusters must be positive")
+        if self.minimum_bin_evidence_clusters < 1:
+            raise ValueError("minimum_bin_evidence_clusters must be positive")
+        if self.minimum_evidence_clusters < self.minimum_bin_evidence_clusters:
+            raise ValueError(
+                "minimum_evidence_clusters cannot be smaller than the plotted-bin minimum"
+            )
         if self.control_sample_size < 1 or self.evidence_per_slice < 1:
             raise ValueError("sample sizes must be positive")
 
@@ -60,6 +102,9 @@ class SeriesComputation:
     hit_scores: np.ndarray
     k: int
     threshold: float
+    evidence_k: int
+    evidence_threshold: float
+    evidence_bin_indices: frozenset[int]
     low_signal: bool
     diagnostics: DiagnosticsJSON
     points: tuple[PointJSON, ...]
@@ -137,9 +182,16 @@ class SearchService:
         )
 
         bins = self._bin_payload(corpus)
-        series = [self._series_payload(term, result) for term, result in zip(terms, computations)]
-        evidence = self._evidence_payload(
-            selected_term, selected_computation, corpus, bin_index
+        series = [
+            self._series_payload(term, result, corpus)
+            for term, result in zip(terms, computations)
+        ]
+        evidence = (
+            self._evidence_payload(
+                selected_term, selected_computation, corpus, bin_index
+            )
+            if bin_index is not None
+            else None
         )
         warnings: list[str] = []
         for term, result in zip(terms, computations):
@@ -179,9 +231,14 @@ class SearchService:
             "metric": {
                 "id": METRIC_ID,
                 "version": self.config.metric_version,
-                "label": f"Global top-{self.config.percentile * 100:g}% concentration lift",
-                "percentile": self.config.percentile,
+                "label": "Filtered visual-match concentration",
+                "percentile": self.config.evidence_percentile,
                 "unit": "lift",
+                "description": (
+                    "Zero means no score-qualified matches were found in this corpus for that "
+                    "period; gaps mark periods with too little corpus coverage or too few "
+                    "independent visual matches to estimate. Neither implies historical absence."
+                ),
             },
             "bins": bins,
             "series": series,
@@ -256,6 +313,10 @@ class SearchService:
                 "metricId": METRIC_ID,
                 "metricVersion": self.config.metric_version,
                 "percentile": self.config.percentile,
+                "evidencePercentile": self.config.evidence_percentile,
+                "minimumEvidenceScore": self.config.minimum_evidence_score,
+                "minimumEvidenceClusters": self.config.minimum_evidence_clusters,
+                "minimumBinEvidenceClusters": self.config.minimum_bin_evidence_clusters,
                 "countingUnit": self.artifacts.counting_unit,
             }
         )
@@ -271,10 +332,26 @@ class SearchService:
         cache_key: str,
     ) -> SeriesComputation:
         weights = self.artifacts.date_weights
+
+        evidence_rank_k = min(
+            len(hit_indices),
+            max(1, math.ceil(self.config.evidence_percentile * len(corpus.row_ids))),
+        )
+        rank_threshold = float(hit_scores[evidence_rank_k - 1])
+        evidence_threshold = (
+            rank_threshold
+            if self.config.minimum_evidence_score is None
+            else max(rank_threshold, self.config.minimum_evidence_score)
+        )
+        evidence_k = int(
+            np.count_nonzero(hit_scores[:evidence_rank_k] >= evidence_threshold)
+        )
+        evidence_rows = hit_indices[:evidence_k]
         hit_mass = np.zeros(len(self.artifacts.bins), dtype=np.float64)
         contributor_rows: list[set[int]] = [set() for _ in self.artifacts.bins]
         contributor_clusters: list[set[str]] = [set() for _ in self.artifacts.bins]
-        for raw_row in hit_indices:
+        evidence_bin_indices: set[int] = set()
+        for raw_row in evidence_rows:
             row = int(raw_row)
             start, end = weights.indptr[row], weights.indptr[row + 1]
             columns = weights.indices[start:end]
@@ -282,13 +359,18 @@ class SearchService:
             cluster = str(self.artifacts.metadata[row].get("visualClusterId") or f"row-{row}")
             for raw_column in columns:
                 column = int(raw_column)
+                evidence_bin_indices.add(column)
                 contributor_rows[column].add(row)
                 contributor_clusters[column].add(cluster)
         points: list[PointJSON] = []
         for bin_index, bin_item in enumerate(self.artifacts.bins):
             denominator = float(corpus.denominators[bin_index])
             share = float(hit_mass[bin_index] / denominator) if denominator else 0.0
-            lift = share / self.config.percentile if denominator else 0.0
+            lift = (
+                share / self.config.evidence_percentile
+                if denominator
+                else 0.0
+            )
             points.append(
                 {
                     "binKey": bin_item.key,
@@ -304,6 +386,31 @@ class SearchService:
         diagnostics, low_signal = self._diagnostics(
             term, encoded, hit_indices, hit_scores, prompt_hit_indices, corpus
         )
+        reliable_evidence_bins = {
+            index
+            for index in evidence_bin_indices
+            if corpus.denominators[index] >= self.config.minimum_denominator
+            and len(contributor_clusters[index])
+            >= self.config.minimum_bin_evidence_clusters
+        }
+        if not evidence_bin_indices:
+            diagnostics = {
+                **diagnostics,
+                "reasons": [
+                    *diagnostics["reasons"],
+                    "no dated matches passed the visual-evidence score cutoff",
+                ],
+            }
+            low_signal = True
+        elif not reliable_evidence_bins:
+            diagnostics = {
+                **diagnostics,
+                "reasons": [
+                    *diagnostics["reasons"],
+                    "score-qualified matches occur only in statistically unreliable periods",
+                ],
+            }
+            low_signal = True
         return SeriesComputation(
             cache_key=cache_key,
             query_vector=encoded.combined,
@@ -311,6 +418,9 @@ class SearchService:
             hit_scores=np.asarray(hit_scores, dtype=np.float32),
             k=len(hit_indices),
             threshold=float(hit_scores[-1]),
+            evidence_k=evidence_k,
+            evidence_threshold=evidence_threshold,
+            evidence_bin_indices=frozenset(evidence_bin_indices),
             low_signal=low_signal,
             diagnostics=diagnostics,
             points=tuple(points),
@@ -385,15 +495,34 @@ class SearchService:
             )
         return payload
 
-    @staticmethod
-    def _series_payload(term: QueryTerm, result: SeriesComputation) -> SeriesJSON:
+    def _series_payload(
+        self,
+        term: QueryTerm,
+        result: SeriesComputation,
+        corpus: ResolvedCorpus,
+    ) -> SeriesJSON:
         return {
             "queryId": term.id,
-            "k": result.k,
-            "threshold": result.threshold,
+            "k": result.evidence_k,
+            "threshold": result.evidence_threshold if result.evidence_k else None,
+            "candidateK": result.k,
+            "candidateThreshold": result.threshold,
             "lowSignal": result.low_signal,
             "diagnostics": result.diagnostics,
-            "points": list(result.points),
+            "points": [
+                point
+                for index, point in enumerate(result.points)
+                if index in result.evidence_bin_indices
+                and corpus.denominators[index] >= self.config.minimum_denominator
+                and point["clusterCount"] >= self.config.minimum_bin_evidence_clusters
+            ],
+            "suppressedBinKeys": [
+                self.artifacts.bins[index].key
+                for index, point in enumerate(result.points)
+                if point["hitMass"] > 0
+                and corpus.denominators[index] >= self.config.minimum_denominator
+                and point["clusterCount"] < self.config.minimum_bin_evidence_clusters
+            ],
             "cacheKey": result.cache_key,
         }
 
@@ -402,23 +531,58 @@ class SearchService:
         selected_bin_key: str | None,
         computation: SeriesComputation,
         corpus: ResolvedCorpus,
-    ) -> int:
+    ) -> int | None:
         if selected_bin_key is not None:
             matches = [i for i, item in enumerate(self.artifacts.bins) if item.key == selected_bin_key]
             if not matches:
                 raise ValueError("selectedBinKey does not name a timeline bin")
-            return matches[0]
-        eligible = [
-            (float(point["lift"]), -index, index)
-            for index, point in enumerate(computation.points)
-            if corpus.denominators[index] >= self.config.minimum_denominator
-        ]
-        if not eligible:
-            eligible = [
-                (float(point["lift"]), -index, index)
-                for index, point in enumerate(computation.points)
+            selected_index = matches[0]
+            if (
+                selected_index not in computation.evidence_bin_indices
+                or corpus.denominators[selected_index] < self.config.minimum_denominator
+                or computation.points[selected_index]["clusterCount"]
+                < self.config.minimum_bin_evidence_clusters
+            ):
+                return None
+            return selected_index
+
+        # Default evidence must land on one of the score-qualified points that
+        # is actually serialized for the chart. Prefer a period supported by
+        # several distinct images, then fall back to any supported period.
+        weights = self.artifacts.date_weights
+        evidence_mass = np.zeros(len(self.artifacts.bins), dtype=np.float64)
+        evidence_clusters: list[set[str]] = [set() for _ in self.artifacts.bins]
+        for raw_row in computation.hit_indices[: computation.evidence_k]:
+            row = int(raw_row)
+            start, end = weights.indptr[row], weights.indptr[row + 1]
+            columns = weights.indices[start:end]
+            np.add.at(evidence_mass, columns, weights.data[start:end])
+            cluster = str(self.artifacts.metadata[row].get("visualClusterId") or f"row-{row}")
+            for raw_column in columns:
+                evidence_clusters[int(raw_column)].add(cluster)
+
+        def evidence_candidates(minimum_clusters: int) -> list[tuple[float, int, int]]:
+            return [
+                (
+                    float(evidence_mass[index] / denominator),
+                    len(evidence_clusters[index]),
+                    -index,
+                )
+                for index, denominator in enumerate(corpus.denominators)
+                if denominator >= self.config.minimum_denominator
+                and evidence_mass[index] > 0
+                and len(evidence_clusters[index]) >= minimum_clusters
             ]
-        return max(eligible)[2]
+
+        strict_candidates = evidence_candidates(
+            self.config.minimum_evidence_clusters
+        )
+        supported_candidates = strict_candidates or evidence_candidates(
+            self.config.minimum_bin_evidence_clusters
+        )
+        if supported_candidates:
+            return -max(supported_candidates)[2]
+        return None
 
     def _evidence_payload(
         self,
@@ -431,16 +595,38 @@ class SearchService:
         period_rows, _ = weights.rows_for_bin(corpus.row_ids, bin_index)
         scores = self.index.score(computation.query_vector, period_rows)
         score_by_row = {int(row): float(score) for row, score in zip(period_rows, scores)}
-        hit_set = set(map(int, computation.hit_indices))
+        evidence_hit_set = set(
+            map(int, computation.hit_indices[: computation.evidence_k])
+        )
         contributors = np.asarray(
-            [int(row) for row in period_rows if int(row) in hit_set], dtype=np.int64
+            [int(row) for row in period_rows if int(row) in evidence_hit_set],
+            dtype=np.int64,
         )
         non_contributors = np.asarray(
-            [int(row) for row in period_rows if int(row) not in hit_set], dtype=np.int64
+            [int(row) for row in period_rows if int(row) not in evidence_hit_set],
+            dtype=np.int64,
         )
         count = self.config.evidence_per_slice
 
-        strongest = sorted(contributors, key=lambda row: (-score_by_row[int(row)], int(row)))[:count]
+        def unique_visual_clusters(rows: Sequence[int]) -> list[int]:
+            selected: list[int] = []
+            seen: set[str] = set()
+            for raw_row in rows:
+                row = int(raw_row)
+                cluster = str(
+                    self.artifacts.metadata[row].get("visualClusterId") or f"row-{row}"
+                )
+                if cluster in seen:
+                    continue
+                seen.add(cluster)
+                selected.append(row)
+                if len(selected) >= count:
+                    break
+            return selected
+
+        strongest = unique_visual_clusters(
+            sorted(contributors, key=lambda row: (-score_by_row[int(row)], int(row)))
+        )
         contributor_by_score = sorted(contributors, key=lambda row: (score_by_row[int(row)], int(row)))
         if contributor_by_score:
             middle = (len(contributor_by_score) - 1) / 2
@@ -457,7 +643,7 @@ class SearchService:
         borderline = sorted(
             period_rows,
             key=lambda row: (
-                abs(score_by_row[int(row)] - computation.threshold),
+                abs(score_by_row[int(row)] - computation.evidence_threshold),
                 int(row),
             ),
         )[:count]
@@ -481,7 +667,7 @@ class SearchService:
                     int(row),
                     score_by_row[int(row)],
                     weights.weight(int(row), bin_index),
-                    int(row) in hit_set,
+                    int(row) in evidence_hit_set,
                 )
                 for row in rows
             ]
@@ -497,6 +683,9 @@ class SearchService:
         return {
             "queryId": term.id,
             "binKey": self.artifacts.bins[bin_index].key,
+            "percentile": self.config.evidence_percentile,
+            "threshold": computation.evidence_threshold,
+            "contributorCount": len(contributors),
             "slices": slices,
         }
 
@@ -513,11 +702,11 @@ class SearchService:
             "title": str(item.get("title", "Untitled")),
             "artist": str(item.get("artist", "Unknown artist")),
             "institution": str(item.get("institution", "Unknown institution")),
-            "sourceRecordUrl": str(item.get("sourceRecordUrl", "")),
+            "sourceRecordUrl": _source_record_url(item.get("sourceRecordUrl", "")),
             "imageUrl": (
                 f"/v1/images/{quote(artwork_id, safe='')}"
                 if local_image is not None
-                else str(item.get("imageUrl", ""))
+                else _display_image_url(item.get("imageUrl", ""))
             ),
             "dateDisplay": str(item.get("dateDisplay", "Unknown date")),
             "dateStart": item.get("dateStart"),

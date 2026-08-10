@@ -19,7 +19,7 @@ class EncodedSeries:
 
 @dataclass(frozen=True)
 class PromptEnsemble:
-    version: str = "art-concept-v1"
+    version: str = "art-concept-fixed64-v2"
     templates: tuple[str, ...] = (
         "{query}",
         "an artwork depicting {query}",

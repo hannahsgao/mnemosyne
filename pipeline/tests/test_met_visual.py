@@ -7,10 +7,15 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
-from pipeline.met_visual import prepare_met_visual_subset
+from pipeline.met_visual import (
+    _cacheable_availability,
+    _optimized_image_url,
+    prepare_met_visual_subset,
+)
 
 
 class _ImageHandler(BaseHTTPRequestHandler):
@@ -45,6 +50,15 @@ class MetVisualSubsetTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
+
+    def test_availability_cache_never_freezes_transient_network_failures(self) -> None:
+        self.assertTrue(_cacheable_availability(True, ""))
+        self.assertTrue(_cacheable_availability(False, "HTTP 404"))
+        self.assertFalse(_cacheable_availability(False, "HTTP 429"))
+        self.assertFalse(_cacheable_availability(False, "HTTP 503"))
+        self.assertFalse(
+            _cacheable_availability(False, "<urlopen error temporary DNS failure>")
+        )
 
     def test_prepares_only_public_domain_met_images(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -92,7 +106,7 @@ class MetVisualSubsetTests(unittest.TestCase):
                 )
 
             source = root / "ArtiFact_clean.csv"
-            image_url = f"http://127.0.0.1:{self.server.server_port}/image.png"
+            image_url = "https://images.metmuseum.org/CRDImages/test/original/example.jpg"
             with source.open("w", encoding="utf-8", newline="") as handle:
                 writer = csv.DictWriter(
                     handle,
@@ -110,16 +124,20 @@ class MetVisualSubsetTests(unittest.TestCase):
                 )
 
             output = root / "prepared" / "met-visual.csv"
-            manifest = prepare_met_visual_subset(
-                met,
-                source,
-                output,
-                root / "prepared" / "images",
-                sample_size=2,
-                source_revision="pinned-revision",
-                workers=2,
-                max_dimension=64,
-            )
+            with patch(
+                "pipeline.met_visual._read_remote_image",
+                return_value=_ImageHandler.payload,
+            ):
+                manifest = prepare_met_visual_subset(
+                    met,
+                    source,
+                    output,
+                    root / "prepared" / "images",
+                    sample_size=2,
+                    source_revision="pinned-revision",
+                    workers=2,
+                    max_dimension=64,
+                )
 
             with output.open(encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
@@ -129,6 +147,12 @@ class MetVisualSubsetTests(unittest.TestCase):
             self.assertTrue(all((output.parent / row["image_path"]).is_file() for row in rows))
             self.assertEqual(manifest["selection"]["prepared_rows"], 2)
             self.assertTrue(output.with_suffix(".manifest.json").is_file())
+
+    def test_met_image_source_rejects_insecure_or_untrusted_hosts(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must use https"):
+            _optimized_image_url("http://images.metmuseum.org/a.jpg")
+        with self.assertRaisesRegex(ValueError, "images.metmuseum.org"):
+            _optimized_image_url("https://127.0.0.1/private.jpg")
 
     def test_stream_manifest_does_not_download_or_store_pixels(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -167,6 +191,7 @@ class MetVisualSubsetTests(unittest.TestCase):
                 output,
                 sample_size=0,
                 source_revision="pinned-revision",
+                preflight=False,
             )
 
             with output.open(encoding="utf-8", newline="") as handle:

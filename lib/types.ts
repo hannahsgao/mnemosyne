@@ -62,9 +62,14 @@ export type SearchSeries = {
   queryId: string;
   k: number;
   threshold: number | null;
+  /** Broad retrieval tail retained for diagnostics before the visual-score gate. */
+  candidateK?: number;
+  candidateThreshold?: number | null;
   lowSignal: boolean | null;
   diagnostics: SeriesDiagnostics;
   points: SeriesPoint[];
+  /** Reliable positive-mass periods hidden because they lack independent visual support. */
+  suppressedBinKeys?: string[];
   cacheKey?: string;
   /** Available on the live metadata adapter, where the catalogue exposes this count. */
   totalMatches?: number;
@@ -105,6 +110,9 @@ export type EvidenceSlices = Record<EvidenceSliceName, EvidenceArtwork[]>;
 export type SelectedEvidence = {
   queryId: string;
   binKey: string;
+  percentile?: number | null;
+  threshold?: number | null;
+  contributorCount?: number;
   slices: EvidenceSlices;
 };
 

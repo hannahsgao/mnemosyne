@@ -3,7 +3,7 @@
 # Optional real local SigLIP 2 image encoder:
 Pillow>=10,<13
 torch>=2.3,<3
-transformers>=4.53,<6
+transformers==4.57.1
 
 # Optional optimized exact index. Builds always include a NumPy flat-IP fallback.
 faiss-cpu>=1.8,<2

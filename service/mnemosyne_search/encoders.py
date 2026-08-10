@@ -137,19 +137,42 @@ class Siglip2TextEncoder:
             raise ValueError("MPS was requested but is unavailable")
         self._device = device
         self._tokenizer = AutoTokenizer.from_pretrained(
-            model_id, revision=revision, local_files_only=local_files_only
+            model_id,
+            revision=revision,
+            local_files_only=local_files_only,
+            use_fast=True,
         )
         self._model = AutoModel.from_pretrained(
             model_id, revision=revision, local_files_only=local_files_only
         ).to(device)
         self._model.eval()
+        text_config = getattr(self._model.config, "text_config", None)
+        self._text_max_length = getattr(text_config, "max_position_embeddings", None)
+        if (
+            isinstance(self._text_max_length, bool)
+            or not isinstance(self._text_max_length, int)
+            or self._text_max_length < 1
+        ):
+            raise RuntimeError(
+                "SigLIP 2 model config must declare a positive text max_position_embeddings"
+            )
 
     @property
     def device(self) -> str:
         return self._device
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
-        inputs = self._tokenizer(list(texts), padding=True, truncation=True, return_tensors="pt")
+        # SigLIP 2's text tower was trained with a fixed 64-token input. Dynamic
+        # batch padding changes the pooling position and can collapse otherwise
+        # unrelated query vectors toward one another, destroying retrieval
+        # quality even though the model and image embeddings are correct.
+        inputs = self._tokenizer(
+            list(texts),
+            padding="max_length",
+            max_length=self._text_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
         inputs = {key: value.to(self._device) for key, value in inputs.items()}
         with self._torch.inference_mode():
             features = self._model.get_text_features(**inputs)

@@ -52,13 +52,8 @@ const UPSTREAM_TIMEOUT_MS = 15_000;
 
 function rewriteBackendImageUrls(payload: unknown, searchMode: SearchMode) {
   if (!payload || typeof payload !== "object") return payload;
-  const selected = (payload as { selectedEvidence?: unknown }).selectedEvidence;
-  if (!selected || typeof selected !== "object") return payload;
-  const slices = (selected as { slices?: unknown }).slices;
-  if (!slices || typeof slices !== "object") return payload;
-
-  for (const items of Object.values(slices)) {
-    if (!Array.isArray(items)) continue;
+  const rewriteItems = (items: unknown) => {
+    if (!Array.isArray(items)) return;
     for (const item of items) {
       if (!item || typeof item !== "object") continue;
       const artwork = item as { imageUrl?: unknown };
@@ -71,6 +66,14 @@ function rewriteBackendImageUrls(payload: unknown, searchMode: SearchMode) {
       } catch {
         artwork.imageUrl = "";
       }
+    }
+  };
+
+  const selected = (payload as { selectedEvidence?: unknown }).selectedEvidence;
+  if (selected && typeof selected === "object") {
+    const slices = (selected as { slices?: unknown }).slices;
+    if (slices && typeof slices === "object") {
+      for (const items of Object.values(slices)) rewriteItems(items);
     }
   }
   return payload;

@@ -9,9 +9,11 @@ import sys
 
 from .build import CorpusBuildError, build_corpus
 from .dates import DateConfig
+from .embedded_corpus import derive_embedded_corpus
 from .embeddings import DeterministicTestEncoder, Siglip2LocalEncoder, build_embedding_index
 from .met import MET_API_BASE, build_met_corpus
 from .met_visual import DEFAULT_MAX_IMAGE_BYTES, prepare_met_visual_subset
+from .repack import repack_embedded_bundle
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -60,6 +62,13 @@ def _parser() -> argparse.ArgumentParser:
         help="ISO-8601 retrieval timestamp; omit for deterministic 'not-recorded'",
     )
     build.add_argument("--metadata-license", default="")
+    build.add_argument(
+        "--source-payload",
+        type=Path,
+        action="append",
+        dest="source_payloads",
+        help="additional source/provenance file to checksum and bundle; repeat as needed",
+    )
     build.add_argument("--bin-size", type=int, default=10)
     build.add_argument("--circa-years", type=int, default=5)
     build.add_argument("--open-range-years", type=int, default=25)
@@ -82,6 +91,31 @@ def _parser() -> argparse.ArgumentParser:
     embed.add_argument("--dtype", choices=("float16", "float32"), default="float32")
     embed.add_argument("--batch-size", type=int, default=16)
     embed.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
+    embed.add_argument(
+        "--download-workers",
+        type=int,
+        default=8,
+        help="parallel remote image fetches per streamed embedding batch",
+    )
+    embed.add_argument("--image-fetch-retries", type=int, default=2)
+    embed.add_argument("--image-request-timeout", type=float, default=30)
+    embed.add_argument("--max-image-pixels", type=int, default=100_000_000)
+    embed.add_argument(
+        "--image-host",
+        action="append",
+        dest="image_hosts",
+        help="allowed HTTPS image host; repeat to allow multiple (default: images.metmuseum.org)",
+    )
+    embed.add_argument(
+        "--no-build-faiss",
+        action="store_true",
+        help="emit only the exact NumPy index (recommended on macOS)",
+    )
+    embed.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        help="resumable work directory; defaults to a hidden sibling of --output",
+    )
     embed.add_argument("--allow-model-download", action="store_true")
     embed.add_argument("--allow-unreviewed-images", action="store_true")
 
@@ -108,6 +142,37 @@ def _parser() -> argparse.ArgumentParser:
     prepare_visual.add_argument("--workers", type=int, default=16)
     prepare_visual.add_argument("--max-dimension", type=int, default=512)
     prepare_visual.add_argument("--max-image-bytes", type=int, default=DEFAULT_MAX_IMAGE_BYTES)
+    prepare_visual.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help="skip the resumable header-only URL availability check",
+    )
+
+    derive = subparsers.add_parser(
+        "derive-embedded-corpus",
+        help="derive a hash-identified canonical CSV from an embedding bundle",
+    )
+    derive.add_argument("--bundle", type=Path, required=True)
+    derive.add_argument(
+        "--visual-manifest",
+        type=Path,
+        required=True,
+        help="preflight manifest containing the source selection and image rights gate",
+    )
+    derive.add_argument("--output", type=Path, required=True)
+
+    repack = subparsers.add_parser(
+        "repack-embedded-bundle",
+        help="pair existing float32 vectors with hash-reconciled corpus metadata",
+    )
+    repack.add_argument("--embedding-bundle", type=Path, required=True)
+    repack.add_argument("--corpus-dir", type=Path, required=True)
+    repack.add_argument("--output", type=Path, required=True)
+    repack.add_argument(
+        "--copy-faiss",
+        action="store_true",
+        help="copy an aligned existing exact FAISS index after validating it",
+    )
     return parser
 
 
@@ -131,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
                     max_year=args.max_year,
                 ),
                 require_parquet=args.require_parquet,
+                source_payloads=[args.input, *(args.source_payloads or [])],
             )
         elif args.command == "build-met":
             manifest = build_met_corpus(
@@ -160,6 +226,18 @@ def main(argv: list[str] | None = None) -> int:
                     args.model_revision or "",
                     allow_download=args.allow_model_download,
                     device=args.device,
+                    download_workers=args.download_workers,
+                    request_timeout=args.image_request_timeout,
+                    fetch_retries=args.image_fetch_retries,
+                    max_image_pixels=args.max_image_pixels,
+                    allowed_image_hosts=args.image_hosts or ("images.metmuseum.org",),
+                    checkpoint_dir=(
+                        args.checkpoint_dir
+                        or args.output.with_name(f".{args.output.name}.checkpoint")
+                    ),
+                    progress=lambda completed, total: print(
+                        f"embedded={completed}/{total}", file=sys.stderr, flush=True
+                    ),
                 )
             manifest = build_embedding_index(
                 args.corpus_dir,
@@ -169,6 +247,7 @@ def main(argv: list[str] | None = None) -> int:
                 dtype=args.dtype,
                 batch_size=args.batch_size,
                 allow_unreviewed_images=args.allow_unreviewed_images,
+                write_faiss=not args.no_build_faiss,
             )
         elif args.command == "prepare-met-visual":
             manifest = prepare_met_visual_subset(
@@ -182,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
                 workers=args.workers,
                 max_dimension=args.max_dimension,
                 max_image_bytes=args.max_image_bytes,
+                preflight=not args.no_preflight,
                 progress=lambda examined, prepared, total: print(
                     f"examined={examined} prepared={prepared}/"
                     f"{args.sample_size or total} "
@@ -189,6 +269,19 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                     flush=True,
                 ),
+            )
+        elif args.command == "derive-embedded-corpus":
+            manifest = derive_embedded_corpus(
+                args.bundle,
+                args.visual_manifest,
+                args.output,
+            )
+        elif args.command == "repack-embedded-bundle":
+            manifest = repack_embedded_bundle(
+                args.embedding_bundle,
+                args.corpus_dir,
+                args.output,
+                copy_faiss=args.copy_faiss,
             )
         else:
             return 2

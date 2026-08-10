@@ -14,10 +14,12 @@ and a local SQLite FTS5 index:
    date-weighted matching share of each period.
 5. Compare one to five comma-separated concepts and inspect matching works.
 
-The embedding path remains available for visual-concept retrieval. It builds
-image embeddings and an exact FAISS `IndexFlatIP` index offline, then runs only
-the text encoder, exact retrieval, and global top-1% concentration lift at query
-time. The image tower never runs in a request.
+The embedding path provides visual-concept retrieval. Its offline builder
+streams each artwork through a pinned SigLIP 2 image tower, discards the pixels,
+and publishes a normalized float32 `embeddings.npy` matrix keyed back to compact
+Met metadata. That matrix is the canonical exact inner-product index; an exact
+FAISS `IndexFlatIP` file is optional. Requests run only the matching text tower,
+exact retrieval, and global top-1% concentration lift.
 
 The web app exposes a URL-backed **Keyword / Embedding** toggle. Keyword is the
 default; embedding mode is represented by `?searchMode=embedding`. In artifact
@@ -94,9 +96,15 @@ visual prevalence of that concept in the images.
 ## Run the embedding search path
 
 The corpus and embedding builders are documented in
-[`pipeline/README.md`](pipeline/README.md). They use a local clean dataset and a
-pinned local SigLIP 2 revision; they do not crawl museum pages or call hosted
-inference APIs.
+[`pipeline/README.md`](pipeline/README.md). They use official Met metadata, a
+pinned clean image-URL table, and a pinned local SigLIP 2 revision. Artwork
+pixels can be streamed directly into bounded embedding batches and discarded;
+the durable bundle stores vectors, Met IDs, compact result metadata, dates,
+rights, and input hashes rather than an image archive. No hosted inference API
+or end-user API key is involved. For Met URLs, the builder starts with the
+smaller `web-large` derivative and re-fetches the original whenever a decoded
+dimension falls below the model's 224 px input floor; the actual URL,
+dimensions, and response hash are retained as provenance.
 
 ```bash
 python3 -m pip install -r pipeline/requirements.txt
@@ -111,9 +119,15 @@ python3 -m pip install -e './service[siglip2,faiss]'
 mnemosyne-search \
   --artifacts /path/to/embedding-bundle \
   --siglip2 \
+  --device auto \
   --host 127.0.0.1 \
   --port 8766
 ```
+
+On macOS, embedding mode defaults to the exact NumPy index because common FAISS
+and PyTorch wheels load conflicting OpenMP runtimes. `--force-faiss` is available
+for a deployment whose wheels have been verified compatible; do not rely on an
+unsafe duplicate-runtime environment workaround.
 
 To enable the toggle, run the keyword service on port 8765 and the embedding
 service on port 8766 at the same time, then configure:
@@ -147,15 +161,22 @@ Met keyword frequency and evidence, and embedding-based independent series.
 
 ```mermaid
 flowchart LR
-  A[Official Met bulk data] --> B[Canonical artwork corpus]
-  B --> C[Precomputed date weights and denominators]
-  B --> D[SQLite FTS5 metadata index]
-  Q[Comma-separated terms] --> D
-  D --> E[Local matching row IDs]
-  C --> F[Aggregate by period]
-  E --> F
-  F --> G[Timeline]
-  E --> H[Matching artwork evidence]
+  A["Official Met bulk data"] --> B["Canonical artwork metadata and dates"]
+  B --> C["SQLite FTS5 keyword index"]
+  U["Pinned, rights-gated image URLs"] --> V["Streamed SigLIP 2 image tower"]
+  V --> W["Float32 embeddings.npy keyed by Met ID"]
+  B --> W
+  Q["Comma-separated concepts"] --> R["Keyword / Embedding mode router"]
+  R --> C
+  R --> T["SigLIP 2 text tower"]
+  T --> W
+  B --> D["Precomputed date weights and denominators"]
+  C --> E["Matching catalogue rows"]
+  W --> F["Exact visual nearest neighbors"]
+  D --> G["Aggregate by period"]
+  E --> G
+  F --> G
+  G --> H["Timeline and artwork evidence"]
 ```
 
 The product has two inseparable outputs: a temporal trace and the artworks that produced it. Keeping the evidence trail first-class makes surprising peaks inspectable and exposes collection bias instead of hiding it behind a smooth chart.

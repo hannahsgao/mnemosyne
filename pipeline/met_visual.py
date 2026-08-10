@@ -5,15 +5,19 @@ from __future__ import annotations
 import csv
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from io import BytesIO
 import json
 import os
 from pathlib import Path
 import re
+import ssl
 import tempfile
+import time
 from typing import Callable, Mapping
-from urllib.parse import urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from .build import CANONICAL_FIELDS, CorpusBuildError, sha256_file
 from .met import MET_CC0_URI
@@ -22,6 +26,88 @@ from .met import MET_CC0_URI
 VISUAL_SUBSET_SCHEMA_VERSION = "mnemosyne-met-visual-subset/v1"
 DEFAULT_MAX_IMAGE_BYTES = 24 * 1024 * 1024
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def _validate_met_image_url(url: str) -> None:
+    parsed = urlsplit(url)
+    if parsed.scheme != "https":
+        raise ValueError("Met image URL must use https")
+    if (parsed.hostname or "").lower().rstrip(".") != "images.metmuseum.org":
+        raise ValueError("Met image URL must use images.metmuseum.org")
+    if parsed.username or parsed.password or parsed.port not in {None, 443}:
+        raise ValueError("Met image URL must not contain credentials or a custom port")
+
+
+class _ValidatedMetRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        _validate_met_image_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _optimized_image_url(url: str) -> str:
+    _validate_met_image_url(url)
+    parsed = urlsplit(url)
+    if parsed.hostname == "images.metmuseum.org" and "/original/" in parsed.path:
+        parsed = parsed._replace(path=parsed.path.replace("/original/", "/web-large/", 1))
+    parsed = parsed._replace(path=quote(parsed.path, safe="/%:@"))
+    return urlunsplit(parsed)
+
+
+@lru_cache(maxsize=1)
+def _verified_ssl_context() -> ssl.SSLContext:
+    try:
+        import certifi
+    except ImportError:  # pragma: no cover - normally supplied by the HTTP/model stack
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+@lru_cache(maxsize=1)
+def _verified_opener():
+    return build_opener(
+        HTTPSHandler(context=_verified_ssl_context()),
+        _ValidatedMetRedirectHandler(),
+    )
+
+
+def _remote_image_available(url: str, retries: int = 2) -> tuple[bool, str]:
+    optimized = _optimized_image_url(url)
+    request = Request(
+        optimized,
+        method="HEAD",
+        headers={"Accept": "image/*", "User-Agent": "Mnemosyne embedding preflight"},
+    )
+    for attempt in range(retries + 1):
+        try:
+            with _verified_opener().open(request, timeout=20) as response:
+                _validate_met_image_url(response.geturl())
+                content_type = response.headers.get("Content-Type", "")
+                if content_type and not content_type.lower().startswith("image/"):
+                    return False, f"unexpected content type: {content_type}"
+                return True, ""
+        except HTTPError as exc:
+            retryable = exc.code in {408, 425, 429} or 500 <= exc.code < 600
+            if not retryable or attempt >= retries:
+                return False, f"HTTP {exc.code}"
+        except (OSError, TimeoutError) as exc:
+            if attempt >= retries:
+                return False, str(exc)
+        time.sleep(0.25 * (2**attempt))
+    return False, "unreachable retry state"
+
+
+def _cacheable_availability(available: bool, reason: str) -> bool:
+    """Persist successes and permanent failures, never transient network state."""
+
+    if available or reason.startswith("unexpected content type:"):
+        return True
+    if reason.startswith("HTTP "):
+        try:
+            status = int(reason.removeprefix("HTTP "))
+        except ValueError:
+            return False
+        return status not in {408, 425, 429} and not 500 <= status < 600
+    return False
 
 
 def _is_true(value: object) -> bool:
@@ -78,14 +164,7 @@ def _candidate_rows(
 
 
 def _read_remote_image(url: str, max_bytes: int) -> bytes:
-    parsed = urlsplit(url)
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("image URL must use http or https")
-    # Met's web-large derivative is already comfortably above SigLIP's 224 px
-    # input while avoiding multi-megabyte originals during corpus preparation.
-    if parsed.hostname == "images.metmuseum.org" and "/original/" in parsed.path:
-        parsed = parsed._replace(path=parsed.path.replace("/original/", "/web-large/", 1))
-        url = urlunsplit(parsed)
+    url = _optimized_image_url(url)
     request = Request(
         url,
         headers={
@@ -93,7 +172,8 @@ def _read_remote_image(url: str, max_bytes: int) -> bytes:
             "User-Agent": "Mnemosyne visual corpus builder",
         },
     )
-    with urlopen(request, timeout=30) as response:
+    with _verified_opener().open(request, timeout=30) as response:
+        _validate_met_image_url(response.geturl())
         declared = response.headers.get("Content-Length")
         if declared and int(declared) > max_bytes:
             raise ValueError("source image exceeds the byte limit")
@@ -213,6 +293,7 @@ def prepare_met_visual_subset(
     workers: int = 16,
     max_dimension: int = 512,
     max_image_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
+    preflight: bool = True,
     progress: Callable[[int, int, int], None] | None = None,
 ) -> dict[str, object]:
     """Download and normalize a deterministic public-domain Met image sample.
@@ -232,15 +313,47 @@ def prepare_met_visual_subset(
     met_root = Path(met_corpus_dir).resolve()
     artifact_path = Path(artifact_csv).resolve()
     output_path = Path(output_csv).resolve()
+    manifest_path = output_path.with_suffix(".manifest.json")
+    incomplete_path = output_path.with_suffix(".incomplete.json")
     images_root = Path(image_dir).resolve() if image_dir is not None else None
-    if output_path.exists():
-        raise CorpusBuildError(f"output CSV already exists: {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if incomplete_path.is_file():
+        try:
+            incomplete = json.loads(incomplete_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise CorpusBuildError(
+                f"invalid incomplete-build marker requires inspection: {incomplete_path}"
+            ) from exc
+        if incomplete.get("schema_version") != VISUAL_SUBSET_SCHEMA_VERSION or incomplete.get(
+            "output"
+        ) != output_path.name:
+            raise CorpusBuildError(
+                f"incomplete-build marker does not own this output: {incomplete_path}"
+            )
+        # The marker proves these are pipeline-owned partial publications.
+        output_path.unlink(missing_ok=True)
+        manifest_path.unlink(missing_ok=True)
+    elif output_path.exists() or manifest_path.exists():
+        raise CorpusBuildError(f"output CSV or manifest already exists: {output_path}")
+    marker_temporary = incomplete_path.with_suffix(".tmp")
+    marker_temporary.write_text(
+        json.dumps(
+            {
+                "schema_version": VISUAL_SUBSET_SCHEMA_VERSION,
+                "output": output_path.name,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    marker_temporary.replace(incomplete_path)
     if images_root is not None:
         images_root.mkdir(parents=True, exist_ok=True)
 
     met_rows = _public_domain_met_rows(met_root / "corpus.csv")
     candidates = _candidate_rows(met_rows, artifact_path, seed)
+    full_scan = sample_size == 0
     target_size = sample_size or len(candidates)
     if len(candidates) < target_size:
         raise CorpusBuildError(
@@ -255,7 +368,7 @@ def prepare_met_visual_subset(
         # The production path deliberately keeps pixels ephemeral.  The image
         # encoder streams these URLs in bounded batches and the durable bundle
         # retains only vectors, Met IDs, and compact card metadata.
-        for candidate in candidates[:target_size]:
+        def append_candidate(candidate: dict[str, str]) -> None:
             selected.append(
                 {
                     **candidate,
@@ -267,9 +380,93 @@ def prepare_met_visual_subset(
                     "embedding_offset": "",
                 }
             )
-        examined = target_size
-        if progress:
-            progress(examined, len(selected), len(candidates))
+
+        if not preflight:
+            for candidate in candidates[:target_size]:
+                append_candidate(candidate)
+            examined = target_size
+            if progress:
+                progress(examined, len(selected), len(candidates))
+        else:
+            availability_path = output_path.with_suffix(".availability.csv")
+            cache_fields = ("artwork_id", "image_url", "available", "reason")
+            cached: dict[str, tuple[bool, str]] = {}
+            candidate_by_id = {row["artwork_id"]: row for row in candidates}
+            if availability_path.is_file():
+                with availability_path.open(encoding="utf-8", newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    if tuple(reader.fieldnames or ()) != cache_fields:
+                        legacy_path = availability_path.with_name(
+                            f"{availability_path.stem}.legacy.csv"
+                        )
+                        if legacy_path.exists():
+                            raise CorpusBuildError(
+                                "availability cache has a legacy schema and its backup already "
+                                f"exists: {legacy_path}"
+                            )
+                        availability_path.replace(legacy_path)
+                        reader = iter(())
+                    for row in reader:
+                        artwork_id = str(row.get("artwork_id") or "").strip()
+                        candidate = candidate_by_id.get(artwork_id)
+                        cached_url = str(row.get("image_url") or "").strip()
+                        if candidate is None or not cached_url:
+                            continue
+                        try:
+                            current_url = _optimized_image_url(candidate["image_url"])
+                        except ValueError:
+                            continue
+                        if cached_url != current_url:
+                            continue
+                        available = _is_true(row.get("available"))
+                        reason = str(row.get("reason") or "")
+                        if _cacheable_availability(available, reason):
+                            cached[artwork_id] = (available, reason)
+            cache_exists = availability_path.is_file() and availability_path.stat().st_size > 0
+            with availability_path.open("a", encoding="utf-8", newline="") as cache_handle:
+                cache_writer = csv.DictWriter(
+                    cache_handle,
+                    fieldnames=cache_fields,
+                    lineterminator="\n",
+                )
+                if not cache_exists:
+                    cache_writer.writeheader()
+                    cache_handle.flush()
+                block_size = max(64, workers * 4)
+                with ThreadPoolExecutor(
+                    max_workers=workers, thread_name_prefix="met-image-head"
+                ) as executor:
+                    for offset in range(0, len(candidates), block_size):
+                        block = candidates[offset : offset + block_size]
+                        missing = [row for row in block if row["artwork_id"] not in cached]
+                        checked = executor.map(
+                            lambda row: _remote_image_available(row["image_url"]), missing
+                        )
+                        for candidate, (available, reason) in zip(missing, checked, strict=True):
+                            cached[candidate["artwork_id"]] = (available, reason)
+                            if _cacheable_availability(available, reason):
+                                cache_writer.writerow(
+                                    {
+                                        "artwork_id": candidate["artwork_id"],
+                                        "image_url": _optimized_image_url(candidate["image_url"]),
+                                        "available": available,
+                                        "reason": reason,
+                                    }
+                                )
+                        cache_handle.flush()
+                        for candidate in block:
+                            examined += 1
+                            available, reason = cached[candidate["artwork_id"]]
+                            if available and len(selected) < target_size:
+                                append_candidate(candidate)
+                            elif not available and len(failures) < 50:
+                                failures.append(
+                                    {"artwork_id": candidate["artwork_id"], "reason": reason}
+                                )
+                        if progress:
+                            progress(examined, len(selected), len(candidates))
+                        if not full_scan and len(selected) >= target_size:
+                            break
     else:
         batch_size = max(64, workers * 4)
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="met-image") as executor:
@@ -299,10 +496,11 @@ def prepare_met_visual_subset(
                 if examined >= batch_size * 3 and not selected:
                     reason = failures[0]["reason"] if failures else "unknown downloader failure"
                     raise CorpusBuildError(
-                        f"no images were prepared after {examined} attempts; first failure: {reason}"
+                        f"no images were prepared after {examined} attempts; "
+                        f"first failure: {reason}"
                     )
 
-    if len(selected) < target_size:
+    if not full_scan and len(selected) < target_size:
         raise CorpusBuildError(
             f"prepared only {len(selected)} of {target_size} images after {examined} candidates"
         )
@@ -319,7 +517,12 @@ def prepare_met_visual_subset(
         delete=False,
     ) as temporary:
         temporary_path = Path(temporary.name)
-        writer = csv.DictWriter(temporary, fieldnames=fields, lineterminator="\n", extrasaction="ignore")
+        writer = csv.DictWriter(
+            temporary,
+            fieldnames=fields,
+            lineterminator="\n",
+            extrasaction="ignore",
+        )
         writer.writeheader()
         writer.writerows(selected)
     try:
@@ -342,7 +545,12 @@ def prepare_met_visual_subset(
             "image_rights_uri": MET_CC0_URI,
         },
         "images": {
-            "storage": "normalized-local-cache" if images_root is not None else "stream-at-embed-time",
+            "storage": (
+                "normalized-local-cache"
+                if images_root is not None
+                else "stream-at-embed-time"
+            ),
+            "availability_preflight": bool(images_root is None and preflight),
             "max_dimension": max_dimension,
             "jpeg_quality": 85,
             "stored_bytes": image_bytes,
@@ -366,9 +574,11 @@ def prepare_met_visual_subset(
         },
         "sample_failures": failures,
     }
-    manifest_path = output_path.with_suffix(".manifest.json")
-    manifest_path.write_text(
+    manifest_temporary = manifest_path.with_suffix(".tmp")
+    manifest_temporary.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    manifest_temporary.replace(manifest_path)
+    incomplete_path.unlink()
     return manifest

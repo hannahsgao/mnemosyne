@@ -73,7 +73,12 @@ class PipelineToSearchIntegrationTests(unittest.TestCase):
                 prompt_ensemble=PromptEnsemble(
                     version="integration-prompts-v1", templates=("{query}",)
                 ),
-                config=SearchConfig(percentile=0.25, minimum_denominator=1),
+                config=SearchConfig(
+                    percentile=0.25,
+                    evidence_percentile=0.25,
+                    minimum_denominator=1,
+                    minimum_bin_evidence_clusters=1,
+                ),
                 prefer_faiss=False,
             )
 
@@ -85,7 +90,11 @@ class PipelineToSearchIntegrationTests(unittest.TestCase):
             self.assertEqual([series["k"] for series in response["series"]], [1, 1])
             self.assertEqual([item["denominator"] for item in response["bins"]], [1.0] * 4)
             self.assertEqual(response["series"][0]["points"][0]["lift"], 4.0)
-            self.assertEqual(response["series"][1]["points"][1]["lift"], 4.0)
+            self.assertEqual(response["series"][1]["points"][0]["lift"], 4.0)
+            self.assertNotEqual(
+                response["series"][0]["points"][0]["binKey"],
+                response["series"][1]["points"][0]["binKey"],
+            )
 
 
 if __name__ == "__main__":

@@ -233,10 +233,16 @@ a { color: inherit; text-decoration: none; }
 
 .timeline-wrap {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto auto;
   min-height: 0;
   overflow: visible;
   padding: 14px clamp(4px, 1.2vw, 16px) 20px;
+}
+
+.timeline-note {
+  color: var(--muted);
+  font-size: 11px;
+  margin: 8px 0 0;
 }
 
 .timeline {
@@ -254,15 +260,27 @@ a { color: inherit; text-decoration: none; }
 .baseline-line { stroke: #bdc1c6; stroke-dasharray: 4 4; stroke-width: 1; }
 .timeline-line {
   fill: none;
-  opacity: .62;
+  opacity: .56;
   pointer-events: none;
   shape-rendering: geometricPrecision;
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: 2;
+  stroke-width: 1.8;
+  transition: opacity 100ms ease, stroke-width 100ms ease;
   vector-effect: non-scaling-stroke;
 }
-.timeline-line.active { opacity: 1; }
+.timeline-line.active { opacity: 1; stroke-width: 2.6; }
+@media (prefers-reduced-motion: reduce) {
+  .timeline-line { transition: none; }
+}
+.timeline-point {
+  opacity: .72;
+  pointer-events: none;
+  stroke: #fff;
+  stroke-width: .8;
+  vector-effect: non-scaling-stroke;
+}
+.timeline-point.active { opacity: 1; }
 .axis-label {
   fill: #70757a;
   font-family: Arial, sans-serif;
