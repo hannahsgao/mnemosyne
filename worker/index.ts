@@ -4,6 +4,7 @@ import {
   handleImageOptimization,
 } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { serveImmutableReleaseAsset } from "../lib/static-release";
 import { handleMetServiceRequest, type D1Database } from "./met-search";
 
 interface Env {
@@ -27,6 +28,11 @@ interface ExecutionContext {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    const releaseAsset = await serveImmutableReleaseAsset(
+      request,
+      env.ASSETS.fetch.bind(env.ASSETS),
+    );
+    if (releaseAsset) return releaseAsset;
     const metResponse = await handleMetServiceRequest(request, env);
     if (metResponse) return metResponse;
     if (url.pathname === "/_vinext/image") {
