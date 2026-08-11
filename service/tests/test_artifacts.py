@@ -33,6 +33,11 @@ class PipelineArtifactContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checksum"):
                 ArtifactBundle.load(root)
 
+            # A trusted-provisioning resume may skip hashing, but still performs
+            # the structural, byte-size, dimensional, and normalization checks.
+            bundle = ArtifactBundle.load(root, verify_checksums=False)
+            self.assertEqual(bundle.embeddings.shape, (10, 4))
+
     def test_sparse_membership_counts_rows_and_distinct_clusters_in_one_pass(self) -> None:
         weights = SparseDateWeights(
             indptr=np.asarray([0, 2, 3], dtype=np.int64),

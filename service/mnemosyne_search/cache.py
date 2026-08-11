@@ -20,7 +20,10 @@ def series_cache_key(payload: dict[str, Any]) -> str:
 
 @dataclass
 class InMemorySeriesCache(Generic[T]):
-    max_entries: int = 512
+    # A production embedding entry contains a full 1,703-bin computation plus
+    # retrieval arrays.  Hundreds of Python-dict series can consume hundreds of
+    # megabytes, so keep the default deliberately bounded; callers may tune it.
+    max_entries: int = 64
 
     def __post_init__(self) -> None:
         self._values: OrderedDict[str, T] = OrderedDict()

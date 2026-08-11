@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     index.add_argument(
         "--force-faiss",
         action="store_true",
-        help="force FAISS on macOS after verifying wheel OpenMP compatibility",
+        help="use FAISS after benchmarking memory and wheel compatibility",
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--siglip2", action="store_true", help="load the local SigLIP 2 text tower")
@@ -95,12 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
 def _prefer_faiss(args: argparse.Namespace, platform: str = sys.platform) -> bool:
     if args.force_faiss:
         return True
-    if args.no_faiss:
-        return False
-    # Common pip wheels for PyTorch and FAISS load duplicate libomp runtimes on
-    # macOS and can terminate the first query. NumPy/BLAS remains exact and was
-    # faster than accepting that unsafe runtime configuration on Apple Silicon.
-    return not (platform == "darwin" and args.siglip2)
+    # The bounded NumPy path is exact and avoids retaining a second full copy of
+    # the embedding matrix. Common macOS PyTorch/FAISS wheels can also load
+    # incompatible duplicate OpenMP runtimes. FAISS therefore remains an
+    # explicit, benchmarked opt-in on every platform.
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:

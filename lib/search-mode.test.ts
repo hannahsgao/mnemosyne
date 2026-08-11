@@ -2,19 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildBackendImageUrl,
+  buildEvidenceUrl,
   buildSearchUrl,
   configuredSearchServiceUrl,
   DEFAULT_SEARCH_MODE,
   isSearchMode,
+  pageUrlForSearchState,
   pageUrlForSearchMode,
+  searchPageStateFromUrl,
   searchModeFromUrl,
   searchServiceEnvironmentName,
 } from "./search-mode.ts";
 
-test("uses keyword as the URL default and accepts the two supported modes", () => {
-  assert.equal(DEFAULT_SEARCH_MODE, "keyword");
-  assert.equal(searchModeFromUrl(null), "keyword");
-  assert.equal(searchModeFromUrl("unknown"), "keyword");
+test("uses visual concepts as the URL default and accepts the two supported modes", () => {
+  assert.equal(DEFAULT_SEARCH_MODE, "embedding");
+  assert.equal(searchModeFromUrl(null), "embedding");
+  assert.equal(searchModeFromUrl("unknown"), "embedding");
   assert.equal(searchModeFromUrl("keyword"), "keyword");
   assert.equal(searchModeFromUrl("embedding"), "embedding");
   assert.equal(isSearchMode("semantic"), false);
@@ -33,19 +36,53 @@ test("builds mode-specific search and evidence requests", () => {
     buildBackendImageUrl("met:123/a", "embedding"),
     "/api/backend-image?id=met%3A123%2Fa&searchMode=embedding",
   );
+  assert.equal(
+    buildEvidenceUrl("horse", "keyword", { queryId: "q-1", binKey: "1900-1949" }),
+    "/api/evidence?q=horse&searchMode=keyword&evidenceQueryId=q-1&evidenceBinKey=1900-1949",
+  );
 });
 
 test("stores only the non-default mode in the page URL", () => {
   assert.equal(
     pageUrlForSearchMode("https://example.test/explore?panel=open#results", "embedding"),
-    "/explore?panel=open&searchMode=embedding#results",
+    "/explore?panel=open#results",
   );
   assert.equal(
     pageUrlForSearchMode(
       "https://example.test/explore?panel=open&searchMode=embedding#results",
       "keyword",
     ),
-    "/explore?panel=open#results",
+    "/explore?panel=open&searchMode=keyword#results",
+  );
+});
+
+test("round-trips query, mode, selected concept, and period in page state", () => {
+  const nextUrl = pageUrlForSearchState(
+    "https://example.test/explore?panel=open#results",
+    {
+      query: "stallion, ship",
+      mode: "embedding",
+      selection: { queryId: "horse", binKey: "year:1880" },
+    },
+  );
+  assert.equal(
+    nextUrl,
+    "/explore?panel=open&q=stallion%2C+ship&concept=horse&period=year%3A1880#results",
+  );
+  assert.deepEqual(
+    searchPageStateFromUrl(`https://example.test${nextUrl}`, "Horse, Ship"),
+    {
+      query: "stallion, ship",
+      mode: "embedding",
+      selection: { queryId: "horse", binKey: "year:1880" },
+    },
+  );
+});
+
+test("drops incomplete selections and uses the fallback query", () => {
+  assert.deepEqual(
+    searchPageStateFromUrl("/explore?period=year%3A1900&searchMode=keyword", "Horse, Ship"),
+    { query: "Horse, Ship", mode: "keyword", selection: null },
   );
 });
 

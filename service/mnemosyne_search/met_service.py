@@ -18,6 +18,7 @@ from .models import (
     BinJSON,
     DiagnosticsJSON,
     EvidenceCardJSON,
+    EvidenceResponse,
     EvidenceSlicesJSON,
     PointJSON,
     QueryTerm,
@@ -29,6 +30,7 @@ from .parsing import parse_query
 
 
 SCHEMA_VERSION = "mnemosyne.search.v1"
+EVIDENCE_SCHEMA_VERSION = "mnemosyne.evidence.v1"
 METRIC_ID = "met-metadata-frequency"
 @dataclass(frozen=True)
 class MetKeywordConfig:
@@ -74,9 +76,11 @@ class MetKeywordSearchService:
     ) -> None:
         self.artifacts = artifacts
         self.client = client
-        self.evidence_client = evidence_client or client
+        self.evidence_client = (
+            evidence_client if evidence_client is not None else client
+        )
         self.config = config or MetKeywordConfig()
-        self.cache = cache or InMemorySeriesCache()
+        self.cache = cache if cache is not None else InMemorySeriesCache()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def close(self) -> None:
@@ -169,6 +173,39 @@ class MetKeywordSearchService:
             "generatedAt": self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
 
+    def evidence(self, request: SearchRequest) -> EvidenceResponse:
+        """Return only the selected Met evidence, reusing cached match rows."""
+
+        terms = parse_query(request.query)
+        corpus = self.artifacts.resolve_corpus(request.corpus_view, request.filters)
+        eligible_rows = frozenset(map(int, corpus.row_ids))
+
+        selected_index = 0
+        if request.selected_query_id is not None:
+            matches = [
+                index
+                for index, term in enumerate(terms)
+                if term.id == request.selected_query_id
+            ]
+            if not matches:
+                raise ValueError("selectedQueryId does not name a parsed query series")
+            selected_index = matches[0]
+        selected_term = terms[selected_index]
+        computation = self._series(selected_term, corpus, eligible_rows)
+        bin_index = self._selected_bin_index(
+            request.selected_bin_key, computation, corpus
+        )
+        return {
+            "schemaVersion": EVIDENCE_SCHEMA_VERSION,
+            "selectedEvidence": self._evidence_payload(
+                selected_term, computation, bin_index
+            ),
+            "generatedAt": self.clock()
+            .astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+
     def _series(
         self,
         term: QueryTerm,
@@ -185,6 +222,8 @@ class MetKeywordSearchService:
                 "searchMode": self.config.search_mode,
                 "metricId": METRIC_ID,
                 "metricVersion": self.config.metric_version,
+                "schemaVersion": SCHEMA_VERSION,
+                "minimumDenominator": self.config.minimum_denominator,
                 "countingUnit": self.artifacts.counting_unit,
             }
         )
@@ -338,7 +377,7 @@ class MetKeywordSearchService:
             with ThreadPoolExecutor(max_workers=min(8, len(selected))) as executor:
                 cards = list(executor.map(lambda row: self._evidence_card(row, bin_index), selected))
         slices: EvidenceSlicesJSON = {
-            "strongest": [],
+            "strongest": cards,
             "representative": [],
             "borderline": [],
             "randomContributors": cards,

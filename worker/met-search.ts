@@ -1,3 +1,5 @@
+import { keywordEvidenceSlices } from "../lib/evidence.ts";
+
 type D1Row = Record<string, unknown>;
 
 interface D1Result<T = D1Row> {
@@ -66,16 +68,38 @@ type CachedObject = {
   public_domain: number;
 };
 
-const JSON_HEADERS = {
+const PUBLIC_JSON_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "public, max-age=60, s-maxage=300",
+};
+const PRIVATE_JSON_HEADERS = {
+  "Content-Type": "application/json; charset=utf-8",
+  "Cache-Control": "private, no-store",
 };
 const MET_API_BASE = "https://collectionapi.metmuseum.org/public/collection/v1";
 const MINIMUM_DENOMINATOR = 20;
 const MAX_SERIES = 5;
+const SEARCH_SCHEMA_VERSION = "mnemosyne.search.v1";
+const EVIDENCE_SCHEMA_VERSION = "mnemosyne.evidence.v1";
 
-function json(body: unknown, status = 200, headers: HeadersInit = JSON_HEADERS) {
-  return new Response(JSON.stringify(body), { status, headers });
+class RequestValidationError extends Error {
+  override readonly name = "RequestValidationError";
+}
+
+function publicJson(body: unknown) {
+  return new Response(JSON.stringify(body), { status: 200, headers: PUBLIC_JSON_HEADERS });
+}
+
+function privateJson(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: PRIVATE_JSON_HEADERS });
+}
+
+function validationErrorResponse(error: RequestValidationError) {
+  return privateJson({ error: error.message }, 400);
+}
+
+function internalErrorResponse() {
+  return privateJson({ error: "Internal server error" }, 500);
 }
 
 function normalizeTerm(value: string) {
@@ -90,8 +114,10 @@ async function termId(normalized: string) {
 }
 
 async function parseQuery(raw: unknown): Promise<QueryTerm[]> {
-  if (typeof raw !== "string") throw new Error("query must be a string");
-  if (raw.length > 500) throw new Error("query must be at most 500 characters");
+  if (typeof raw !== "string") throw new RequestValidationError("query must be a string");
+  if (raw.length > 500) {
+    throw new RequestValidationError("query must be at most 500 characters");
+  }
   const fields: string[] = [];
   let buffer = "";
   let inQuotes = false;
@@ -111,9 +137,11 @@ async function parseQuery(raw: unknown): Promise<QueryTerm[]> {
       buffer += character;
     }
   }
-  if (inQuotes) throw new Error("query contains an unmatched double quote");
+  if (inQuotes) throw new RequestValidationError("query contains an unmatched double quote");
   fields.push(buffer.trim());
-  if (fields.some((field) => !field)) throw new Error("query contains an empty series");
+  if (fields.some((field) => !field)) {
+    throw new RequestValidationError("query contains an empty series");
+  }
 
   const seen = new Set<string>();
   const terms: QueryTerm[] = [];
@@ -123,9 +151,11 @@ async function parseQuery(raw: unknown): Promise<QueryTerm[]> {
     seen.add(normalized);
     terms.push({ id: await termId(normalized), label, normalized });
   }
-  if (!terms.length) throw new Error("query must contain at least one series");
+  if (!terms.length) {
+    throw new RequestValidationError("query must contain at least one series");
+  }
   if (terms.length > MAX_SERIES) {
-    throw new Error(`query supports at most ${MAX_SERIES} unique series`);
+    throw new RequestValidationError(`query supports at most ${MAX_SERIES} unique series`);
   }
   return terms;
 }
@@ -237,7 +267,9 @@ function selectedBinIndex(
 ) {
   if (typeof requestedKey === "string") {
     const index = bins.findIndex((bin) => bin.bin_key === requestedKey);
-    if (index < 0) throw new Error("selectedBinKey does not name a timeline bin");
+    if (index < 0) {
+      throw new RequestValidationError("selectedBinKey does not name a timeline bin");
+    }
     return index;
   }
   let bestIndex = 0;
@@ -421,26 +453,58 @@ async function evidence(
   });
 }
 
+function selectedTermIndex(payload: Record<string, unknown>, terms: QueryTerm[]) {
+  const index =
+    typeof payload.selectedQueryId === "string"
+      ? terms.findIndex((term) => term.id === payload.selectedQueryId)
+      : 0;
+  if (index < 0) {
+    throw new RequestValidationError("selectedQueryId does not name a parsed query series");
+  }
+  return index;
+}
+
+function selectedEvidencePayload(term: QueryTerm, bin: BinRow, cards: Awaited<ReturnType<typeof evidence>>) {
+  return {
+    queryId: term.id,
+    binKey: bin.bin_key,
+    slices: keywordEvidenceSlices(cards),
+  };
+}
+
+async function requestPayload(request: Request) {
+  try {
+    const payload = (await request.json()) as unknown;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new RequestValidationError("request body must be a JSON object");
+    }
+    return payload as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof RequestValidationError) throw error;
+    throw new RequestValidationError("request body must be JSON");
+  }
+}
+
 async function handleSearch(request: Request, db: D1Database) {
   let payload: Record<string, unknown>;
   try {
-    payload = (await request.json()) as Record<string, unknown>;
-  } catch {
-    return json({ error: "request body must be JSON" }, 400);
+    payload = await requestPayload(request);
+  } catch (error) {
+    return error instanceof RequestValidationError
+      ? validationErrorResponse(error)
+      : internalErrorResponse();
   }
   try {
     const terms = await parseQuery(payload.query);
     const bins = await loadBins(db);
-    if (!bins.length) return json({ error: "The Met corpus has not been imported yet." }, 503);
+    if (!bins.length) {
+      return privateJson({ error: "The Met corpus has not been imported yet." }, 503);
+    }
     const corpusCountRow = await db.prepare("SELECT COUNT(*) AS total FROM artworks").first<{
       total: number;
     }>();
     const aggregates = await Promise.all(terms.map((term) => aggregateTerm(db, term, bins)));
-    const selectedIndex =
-      typeof payload.selectedQueryId === "string"
-        ? terms.findIndex((term) => term.id === payload.selectedQueryId)
-        : 0;
-    if (selectedIndex < 0) throw new Error("selectedQueryId does not name a parsed query series");
+    const selectedIndex = selectedTermIndex(payload, terms);
     const binIndex = selectedBinIndex(payload.selectedBinKey, bins, aggregates[selectedIndex].points);
     const cards = await evidence(
       db,
@@ -460,8 +524,8 @@ async function handleSearch(request: Request, db: D1Database) {
         warnings.push(`No eligible corpus matches were found for '${term.label}'.`);
       }
     });
-    return json({
-      schemaVersion: "mnemosyne.search.v1",
+    return publicJson({
+      schemaVersion: SEARCH_SCHEMA_VERSION,
       queries: terms,
       corpus: {
         id: "met-open-access",
@@ -506,23 +570,61 @@ async function handleSearch(request: Request, db: D1Database) {
         points: aggregates[index].points,
         totalMatches: aggregates[index].totalMatches,
       })),
-      selectedEvidence: {
-        queryId: terms[selectedIndex].id,
-        binKey: bins[binIndex].bin_key,
-        slices: {
-          strongest: [],
-          representative: [],
-          borderline: [],
-          randomContributors: cards,
-          bestNonContributors: [],
-          randomDenominator: [],
-        },
-      },
+      selectedEvidence: selectedEvidencePayload(
+        terms[selectedIndex],
+        bins[binIndex],
+        cards,
+      ),
       warnings,
       generatedAt: new Date().toISOString(),
     });
   } catch (error) {
-    return json({ error: error instanceof Error ? error.message : "Search failed" }, 400);
+    return error instanceof RequestValidationError
+      ? validationErrorResponse(error)
+      : internalErrorResponse();
+  }
+}
+
+async function handleEvidence(request: Request, db: D1Database) {
+  let payload: Record<string, unknown>;
+  try {
+    payload = await requestPayload(request);
+  } catch (error) {
+    return error instanceof RequestValidationError
+      ? validationErrorResponse(error)
+      : internalErrorResponse();
+  }
+  try {
+    const terms = await parseQuery(payload.query);
+    const bins = await loadBins(db);
+    if (!bins.length) {
+      return privateJson({ error: "The Met corpus has not been imported yet." }, 503);
+    }
+    const selectedIndex = selectedTermIndex(payload, terms);
+    const term = terms[selectedIndex];
+
+    let binIndex: number;
+    if (typeof payload.selectedBinKey === "string") {
+      binIndex = bins.findIndex((bin) => bin.bin_key === payload.selectedBinKey);
+      if (binIndex < 0) {
+        throw new RequestValidationError("selectedBinKey does not name a timeline bin");
+      }
+    } else {
+      // Retain the search endpoint's default-period behavior for callers that
+      // omit a bin. Explicit period requests avoid this aggregation entirely.
+      const aggregate = await aggregateTerm(db, term, bins);
+      binIndex = selectedBinIndex(undefined, bins, aggregate.points);
+    }
+    const cards = await evidence(db, term, ftsExpression(term.normalized), bins[binIndex]);
+    return publicJson({
+      schemaVersion: EVIDENCE_SCHEMA_VERSION,
+      selectedEvidence: selectedEvidencePayload(term, bins[binIndex], cards),
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    return error instanceof RequestValidationError
+      ? validationErrorResponse(error)
+      : internalErrorResponse();
   }
 }
 
@@ -556,21 +658,21 @@ function authorized(request: Request, token: string | undefined) {
 }
 
 async function handleImport(request: Request, db: D1Database, token: string | undefined) {
-  if (!authorized(request, token)) return json({ error: "Unauthorized" }, 401);
+  if (!authorized(request, token)) return privateJson({ error: "Unauthorized" }, 401);
   if (request.method === "GET") {
     const [artwork, bin, cache] = await Promise.all([
       db.prepare("SELECT COUNT(*) AS count, MAX(row_id) AS max_row_id FROM artworks").first(),
       db.prepare("SELECT COUNT(*) AS count FROM bins").first(),
       db.prepare("SELECT COUNT(*) AS count FROM met_object_cache").first(),
     ]);
-    return json({ artwork, bin, cache }, 200, { "Content-Type": "application/json" });
+    return privateJson({ artwork, bin, cache });
   }
-  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
-  const payload = (await request.json()) as { kind?: string; rows?: D1Row[] };
+  if (request.method !== "POST") return privateJson({ error: "Method not allowed" }, 405);
+  const payload = (await requestPayload(request)) as { kind?: string; rows?: D1Row[] };
   if (payload.kind === "artworks") {
     const incoming = Array.isArray(payload.rows) ? payload.rows : [];
     if (!incoming.length || incoming.length > 500) {
-      return json({ error: "artworks import requires 1-500 rows" }, 400);
+      return privateJson({ error: "artworks import requires 1-500 rows" }, 400);
     }
     const sql = `INSERT OR IGNORE INTO artworks (${ARTWORK_COLUMNS.join(", ")})
                  VALUES (${ARTWORK_COLUMNS.map(() => "?").join(", ")})`;
@@ -580,7 +682,7 @@ async function handleImport(request: Request, db: D1Database, token: string | un
       );
       await db.batch(statements);
     }
-    return json({ imported: incoming.length }, 200, { "Content-Type": "application/json" });
+    return privateJson({ imported: incoming.length });
   }
   if (payload.kind === "bins") {
     const incoming = Array.isArray(payload.rows) ? payload.rows : [];
@@ -604,33 +706,51 @@ async function handleImport(request: Request, db: D1Database, token: string | un
         ),
       );
     }
-    return json({ imported: incoming.length }, 200, { "Content-Type": "application/json" });
+    return privateJson({ imported: incoming.length });
   }
   if (payload.kind === "finalize") {
     await db.prepare("INSERT INTO artwork_fts(artwork_fts) VALUES('optimize')").run();
     await db
       .prepare("INSERT OR REPLACE INTO corpus_meta(key, value) VALUES('ready', 'true')")
       .run();
-    return json({ ready: true }, 200, { "Content-Type": "application/json" });
+    return privateJson({ ready: true });
   }
-  return json({ error: "Unknown import kind" }, 400);
+  return privateJson({ error: "Unknown import kind" }, 400);
 }
 
 export async function handleMetServiceRequest(request: Request, env: MetEnv) {
   const pathname = new URL(request.url).pathname;
-  if (pathname !== "/v1/search" && pathname !== "/v1/health" && pathname !== "/_admin/met/import") {
+  if (
+    pathname !== "/v1/search" &&
+    pathname !== "/v1/evidence" &&
+    pathname !== "/v1/health" &&
+    pathname !== "/_admin/met/import"
+  ) {
     return null;
   }
-  if (!env.DB) return json({ error: "D1 corpus binding is unavailable" }, 503);
-  if (pathname === "/v1/health") {
-    const ready = await env.DB
-      .prepare("SELECT value FROM corpus_meta WHERE key = 'ready'")
-      .first<{ value: string }>();
-    return json({ status: ready?.value === "true" ? "ok" : "loading", backend: "d1-fts5" });
+  if (!env.DB) return privateJson({ error: "D1 corpus binding is unavailable" }, 503);
+  try {
+    if (pathname === "/v1/health") {
+      const ready = await env.DB
+        .prepare("SELECT value FROM corpus_meta WHERE key = 'ready'")
+        .first<{ value: string }>();
+      return publicJson({
+        status: ready?.value === "true" ? "ok" : "loading",
+        backend: "d1-fts5",
+      });
+    }
+    if (pathname === "/_admin/met/import") {
+      return await handleImport(request, env.DB, env.MNEMOSYNE_IMPORT_TOKEN);
+    }
+    if (request.method !== "POST") {
+      return privateJson({ error: "Method not allowed" }, 405);
+    }
+    return pathname === "/v1/evidence"
+      ? await handleEvidence(request, env.DB)
+      : await handleSearch(request, env.DB);
+  } catch (error) {
+    return error instanceof RequestValidationError
+      ? validationErrorResponse(error)
+      : internalErrorResponse();
   }
-  if (pathname === "/_admin/met/import") {
-    return handleImport(request, env.DB, env.MNEMOSYNE_IMPORT_TOKEN);
-  }
-  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
-  return handleSearch(request, env.DB);
 }

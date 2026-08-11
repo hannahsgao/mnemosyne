@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
-from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from threading import RLock
 from typing import Protocol
 
 import numpy as np
@@ -47,20 +44,33 @@ class NumpyFlatIPIndex:
     ) -> tuple[np.ndarray, np.ndarray]:
         """Select exact top-k rows without fully sorting every score block."""
 
-        output_indices = np.empty((len(candidate_scores), k), dtype=np.int64)
-        output_scores = np.empty((len(candidate_scores), k), dtype=np.float32)
+        # The first row block can contain fewer than the final requested k.
+        # Retain every candidate until enough blocks have accumulated, then
+        # keep exactly k for the remaining passes.
+        retained_count = min(k, candidate_scores.shape[1])
+        output_indices = np.empty(
+            (len(candidate_scores), retained_count), dtype=np.int64
+        )
+        output_scores = np.empty(
+            (len(candidate_scores), retained_count), dtype=np.float32
+        )
         for query_index, scores in enumerate(candidate_scores):
             indices = candidate_indices[query_index]
-            if len(scores) <= k:
+            if len(scores) <= retained_count:
                 selected = np.arange(len(scores), dtype=np.int64)
             else:
-                partition = np.argpartition(-scores, k - 1)[:k]
+                partition = np.argpartition(-scores, retained_count - 1)[
+                    :retained_count
+                ]
                 cutoff = scores[partition].min()
                 better = np.flatnonzero(scores > cutoff)
                 equal = np.flatnonzero(scores == cutoff)
                 equal_order = np.argsort(indices[equal], kind="stable")
                 selected = np.concatenate(
-                    (better, equal[equal_order[: k - len(better)]])
+                    (
+                        better,
+                        equal[equal_order[: retained_count - len(better)]],
+                    )
                 )
             order = np.lexsort((indices[selected], -scores[selected]))
             selected = selected[order]
@@ -135,8 +145,6 @@ class FaissFlatIPIndex:
             ):
                 raise ValueError("prebuilt FAISS index is not the expected exact IndexFlatIP")
         self._numpy_fallback = NumpyFlatIPIndex(self.embeddings)
-        self._subset_indices: OrderedDict[str, tuple[object, np.ndarray]] = OrderedDict()
-        self._subset_lock = RLock()
 
     def search(
         self, queries: np.ndarray, k: int, *, eligible_indices: np.ndarray | None = None
@@ -152,32 +160,19 @@ class FaissFlatIPIndex:
         if eligible_indices is None:
             scores, indices = self._index.search(query_rows, k)
         else:
-            subset = self._subset_index(candidates)
-            scores, local_indices = subset.search(query_rows, k)
-            indices = candidates[local_indices]
+            # Building an IndexFlatIP for every filtered view copies the entire
+            # selected matrix into FAISS and a former 16-entry cache could retain
+            # several gigabytes.  The blocked NumPy path remains exact and keeps
+            # temporary memory bounded to one row tile.
+            return self._numpy_fallback.search(
+                query_rows, k, eligible_indices=candidates
+            )
         # Normalize FAISS ordering for deterministic evidence output.
         for row in range(indices.shape[0]):
             order = np.lexsort((indices[row], -scores[row]))
             indices[row] = indices[row, order]
             scores[row] = scores[row, order]
         return SearchHits(indices=indices.astype(np.int64), scores=scores.astype(np.float32))
-
-    def _subset_index(self, candidates: np.ndarray):
-        """Cache exact IndexFlatIP instances for named/filtered corpus views."""
-
-        digest = hashlib.sha256(np.ascontiguousarray(candidates).tobytes()).hexdigest()
-        with self._subset_lock:
-            cached = self._subset_indices.get(digest)
-            if cached is not None and np.array_equal(cached[1], candidates):
-                self._subset_indices.move_to_end(digest)
-                return cached[0]
-            index = self._faiss.IndexFlatIP(self.embeddings.shape[1])
-            index.add(np.ascontiguousarray(self.embeddings[candidates], dtype=np.float32))
-            self._subset_indices[digest] = (index, candidates.copy())
-            self._subset_indices.move_to_end(digest)
-            while len(self._subset_indices) > 16:
-                self._subset_indices.popitem(last=False)
-            return index
 
     def score(self, query: np.ndarray, indices: np.ndarray) -> np.ndarray:
         return self._numpy_fallback.score(query, indices)
@@ -186,7 +181,7 @@ class FaissFlatIPIndex:
 def create_exact_index(
     embeddings: np.ndarray,
     *,
-    prefer_faiss: bool = True,
+    prefer_faiss: bool = False,
     faiss_index_path: str | Path | None = None,
 ) -> ExactIndex:
     if prefer_faiss:

@@ -39,7 +39,9 @@ API key is required.
 The embedding path performs text encoding, exact normalized inner-product
 retrieval, score-qualified visual concentration lift, diagnostics, and
 period-specific evidence selection. The image tower and image downloads remain
-offline build concerns.
+offline build concerns. Runtime inference loads the pinned tokenizer and
+`SiglipTextModel` text tower only; it does not load the checkpoint's image
+tower.
 
 ### Query and evidence quality policy
 
@@ -125,13 +127,15 @@ also accepts the checked-in JSON fixture representation under
 `service/tests/fixtures`; JSON embeddings and date weights are for small tests,
 not production deployments.
 
-Both backends score the same values from `embeddings.npy`. FAISS `IndexFlatIP`
-is preferred when `faiss-cpu` is installed; a manifest-declared prebuilt index
-is loaded when present, otherwise it can be built in memory. NumPy/BLAS is the
-exact fallback and the automatic SigLIP choice on macOS. A filter is applied
-while scoring the eligible row set; the service never retrieves an unfiltered
-top-K and filters it afterward. Exact FAISS subset indices are retained in a
-bounded in-process cache for repeated corpus views.
+Both backends score the same values from `embeddings.npy`. The bounded
+NumPy/BLAS path is the exact default on every platform so startup does not copy
+the full matrix into a second in-memory index. FAISS `IndexFlatIP` can serve the
+unfiltered corpus after an explicit `--force-faiss` opt-in when `faiss-cpu` is
+installed and its memory/runtime behavior has been benchmarked. Filtered
+searches use bounded exact NumPy scoring over the
+eligible rows rather than building and retaining duplicate FAISS subset
+indices. A filter is applied while scoring the eligible row set; the service
+never retrieves an unfiltered top-K and filters it afterward.
 
 ### Run locally
 
@@ -149,9 +153,10 @@ mnemosyne-search \
 ```
 
 `--device auto` prefers CUDA, then Apple MPS, then CPU for the request-time
-text tower. On macOS, SigLIP mode automatically uses exact NumPy/BLAS retrieval
-because common FAISS and PyTorch wheels expose conflicting OpenMP runtimes.
-`--force-faiss` opts back in after validating a compatible wheel combination.
+text tower. Exact NumPy/BLAS retrieval is the default; `--force-faiss` opts into
+FAISS only after validating the extra matrix memory and a compatible wheel
+combination. This also avoids the conflicting OpenMP runtimes exposed by common
+FAISS and PyTorch wheels on macOS.
 The bounded candidate and qualification defaults are exposed as `--percentile`,
 `--evidence-percentile`, `--minimum-evidence-score`, and
 `--minimum-evidence-clusters` and `--minimum-bin-evidence-clusters`. If prompt templates change, assign a new
@@ -212,6 +217,27 @@ Content-Type: application/json
 }
 ```
 
+Evidence only:
+
+```http
+POST /v1/evidence
+Content-Type: application/json
+
+{
+  "query": "horse, ship",
+  "selectedQueryId": "q-...",
+  "selectedBinKey": "1880:1889",
+  "view": "all",
+  "filters": {}
+}
+```
+
+The evidence route returns only the versioned
+`mnemosyne.evidence.v1` envelope: `selectedEvidence` and `generatedAt`. It
+reuses an existing cached series when possible and never transfers shared bins
+or full timeline series. In keyword mode, an explicit period also skips the
+timeline aggregate query.
+
 Local images recorded by the embedding manifest are available at
 `GET /v1/images/{artworkId}`. Stream-built bundles normally contain no artwork
 pixels, so their evidence cards use the compact corpus's remote image URL and
@@ -242,5 +268,5 @@ python3 -m compileall -q service/mnemosyne_search service/tests
 The tests use only NumPy and Python's standard library. They cover query syntax,
 exact and filtered retrieval, lift math, per-series cache reuse, diagnostics,
 fixed-length text tokenization, filters, score-qualified gapped series,
-selected-period strongest evidence, abstention, strict JSON serialization, and
-the HTTP boundary.
+selected-period strongest evidence, the evidence-only response contract,
+abstention, strict JSON serialization, and the HTTP boundary.

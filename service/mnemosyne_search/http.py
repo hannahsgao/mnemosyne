@@ -59,7 +59,8 @@ def handler_for(service: SearchApplication) -> type[BaseHTTPRequestHandler]:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-            if self.path != "/v1/search":
+            path = urlsplit(self.path).path
+            if path not in {"/v1/search", "/v1/evidence"}:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
             try:
@@ -69,7 +70,12 @@ def handler_for(service: SearchApplication) -> type[BaseHTTPRequestHandler]:
                 payload = json.loads(self.rfile.read(length))
                 if not isinstance(payload, dict):
                     raise ValueError("request body must be a JSON object")
-                response = service.search(_request_from_json(payload))
+                request = _request_from_json(payload)
+                response = (
+                    service.evidence(request)
+                    if path == "/v1/evidence"
+                    else service.search(request)
+                )
             except (json.JSONDecodeError, QuerySyntaxError, TypeError, ValueError) as error:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
                 return

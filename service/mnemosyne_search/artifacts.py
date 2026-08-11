@@ -16,22 +16,65 @@ import numpy as np
 ARTIFACT_SCHEMA_VERSION = "mnemosyne.artifacts.v1"
 PIPELINE_ARTIFACT_SCHEMA_VERSION = "mnemosyne-embedding-build/v1"
 
+# Fields required to validate row order, build filters, and construct the
+# public evidence-card contract.  Large provenance-only columns remain in the
+# immutable CSV and are not expanded into per-row Python dictionaries at query
+# or export time.
+RUNTIME_METADATA_FIELDS = frozenset(
+    {
+        "artworkId",
+        "physicalObjectId",
+        "visualClusterId",
+        "institution",
+        "sourceId",
+        "sourceRecordUrl",
+        "title",
+        "artist",
+        "dateDisplay",
+        "dateStart",
+        "dateEnd",
+        "dateQualifier",
+        "metadataLicense",
+        "imageRightsUri",
+        "creditLine",
+        "publicDomain",
+        "imageAvailable",
+        "imageUrl",
+        "embeddingOffset",
+    }
+)
+
 
 def _camel_case(value: str) -> str:
     return re.sub(r"_([a-z])", lambda match: match.group(1).upper(), value)
 
 
-def load_metadata(path: Path) -> tuple[dict[str, Any], ...]:
+def load_metadata(
+    path: Path, *, fields: frozenset[str] | None = None
+) -> tuple[dict[str, Any], ...]:
     if path.suffix == ".json":
-        return tuple(json.loads(path.read_text(encoding="utf-8")))
+        records = tuple(json.loads(path.read_text(encoding="utf-8")))
+        if fields is None:
+            return records
+        return tuple(
+            {key: value for key, value in record.items() if key in fields}
+            for record in records
+        )
     if path.suffix != ".csv":
         raise ValueError("corpus metadata must use .csv or fixture-only .json format")
     records: list[dict[str, Any]] = []
     with path.open(encoding="utf-8", newline="") as handle:
-        for raw in csv.DictReader(handle):
+        reader = csv.DictReader(handle)
+        # Resolve column names once.  The production corpus has hundreds of
+        # thousands of rows; recomputing the snake-to-camel mapping for every
+        # cell adds millions of regex calls during startup.
+        names = {key: _camel_case(key) for key in (reader.fieldnames or ())}
+        for raw in reader:
             record: dict[str, Any] = {}
             for key, value in raw.items():
-                name = _camel_case(key)
+                name = names[key]
+                if fields is not None and name not in fields:
+                    continue
                 if name in {"dateStart", "dateEnd", "imageWidth", "imageHeight", "embeddingOffset"}:
                     record[name] = int(value) if value else None
                 elif name in {"publicDomain", "imageAvailable"}:
@@ -247,7 +290,9 @@ class ArtifactBundle:
     image_paths: Mapping[str, Path]
 
     @staticmethod
-    def _verify_artifacts(base: Path, manifest: Mapping[str, Any]) -> None:
+    def _verify_artifacts(
+        base: Path, manifest: Mapping[str, Any], *, verify_checksums: bool = True
+    ) -> None:
         resolved_base = base.resolve()
         for entry in manifest.get("artifacts", ()):
             path = (base / str(entry["path"])).resolve()
@@ -259,6 +304,8 @@ class ArtifactBundle:
                 raise ValueError(f"manifest-declared artifact does not exist: {entry['path']}")
             if path.stat().st_size != int(entry["bytes"]):
                 raise ValueError(f"artifact byte count does not match manifest: {entry['path']}")
+            if not verify_checksums:
+                continue
             digest = hashlib.sha256()
             with path.open("rb") as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -267,7 +314,9 @@ class ArtifactBundle:
                 raise ValueError(f"artifact checksum does not match manifest: {entry['path']}")
 
     @classmethod
-    def load(cls, root: str | Path) -> "ArtifactBundle":
+    def load(
+        cls, root: str | Path, *, verify_checksums: bool = True
+    ) -> "ArtifactBundle":
         base = Path(root)
         manifest_path = (
             base / "model-manifest.json"
@@ -278,10 +327,19 @@ class ArtifactBundle:
         schema_version = manifest.get("artifactSchemaVersion", manifest.get("schema_version"))
         if schema_version not in {ARTIFACT_SCHEMA_VERSION, PIPELINE_ARTIFACT_SCHEMA_VERSION}:
             raise ValueError("unsupported or missing artifactSchemaVersion")
-        cls._verify_artifacts(base, manifest)
+        cls._verify_artifacts(base, manifest, verify_checksums=verify_checksums)
 
         files = manifest["files"]
-        metadata = load_metadata(base / files["metadata"])
+        allowed_filter_fields = frozenset(
+            manifest.get(
+                "allowedFilterFields",
+                ["institution", "objectType", "medium", "publicDomain"],
+            )
+        )
+        metadata = load_metadata(
+            base / files["metadata"],
+            fields=RUNTIME_METADATA_FIELDS | allowed_filter_fields,
+        )
         embedding_path = base / files["embeddings"]
         if embedding_path.suffix == ".npy":
             raw_embeddings = np.load(embedding_path, mmap_mode="r")
@@ -292,9 +350,17 @@ class ArtifactBundle:
         else:
             raise ValueError("embeddings must use .npy or fixture-only .json format")
         raw_embeddings = np.asarray(raw_embeddings, dtype=np.float32)
-        raw_norms = np.linalg.norm(raw_embeddings, axis=1)
-        if np.any(raw_norms == 0) or not np.allclose(raw_norms, 1.0, rtol=0, atol=5e-3):
-            raise ValueError("offline artwork embeddings must be L2-normalized")
+        # Validate a bounded view at a time.  A single full-matrix norm call can
+        # allocate another matrix-sized temporary when NumPy squares float32
+        # values before reducing them.
+        norm_block_size = 8_192
+        for start in range(0, raw_embeddings.shape[0], norm_block_size):
+            block = raw_embeddings[start : start + norm_block_size]
+            raw_norms = np.linalg.norm(block, axis=1)
+            if np.any(raw_norms == 0) or not np.allclose(
+                raw_norms, 1.0, rtol=0, atol=5e-3
+            ):
+                raise ValueError("offline artwork embeddings must be L2-normalized")
         # Keep the memory-mapped array intact. Offline builds are already
         # normalized and copying it here used to double resident memory.
         embeddings = raw_embeddings
@@ -402,12 +468,7 @@ class ArtifactBundle:
             default_cluster_counts=default_cluster_counts,
             cluster_ids=cluster_ids,
             views=views,
-            allowed_filter_fields=frozenset(
-                manifest.get(
-                    "allowedFilterFields",
-                    ["institution", "objectType", "medium", "publicDomain"],
-                )
-            ),
+            allowed_filter_fields=allowed_filter_fields,
             image_paths=image_paths,
         )
 
@@ -420,7 +481,9 @@ class ArtifactBundle:
         if view not in self.views:
             raise ValueError(f"unknown corpus view: {view}")
         normalized_filters = {
-            key: tuple(sorted({value.casefold() for value in values if value.strip()}))
+            key: tuple(
+                sorted({value.strip().casefold() for value in values if value.strip()})
+            )
             for key, values in sorted(filters.items())
         }
         unknown_fields = set(normalized_filters) - self.allowed_filter_fields

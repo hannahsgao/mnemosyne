@@ -14,7 +14,7 @@ from mnemosyne_search.artifacts import ArtifactBundle
 from mnemosyne_search.encoders import FixtureTextEncoder
 from mnemosyne_search.http import handler_for
 from mnemosyne_search.prompting import PromptEnsemble
-from mnemosyne_search.service import SearchService
+from mnemosyne_search.service import SearchConfig, SearchService
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -32,6 +32,11 @@ class HttpServiceTests(unittest.TestCase):
             artifacts,
             encoder,
             prompt_ensemble=PromptEnsemble(version="fixture-v1", templates=("{query}",)),
+            config=SearchConfig(
+                minimum_denominator=1,
+                minimum_evidence_clusters=1,
+                minimum_bin_evidence_clusters=1,
+            ),
             prefer_faiss=False,
         )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(service))
@@ -71,6 +76,28 @@ class HttpServiceTests(unittest.TestCase):
             urllib.request.urlopen(request)
         self.assertEqual(caught.exception.code, 400)
         self.assertIn("empty series", caught.exception.read().decode())
+
+    def test_evidence_endpoint_returns_only_the_versioned_envelope(self) -> None:
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/evidence",
+            data=json.dumps(
+                {"query": "horse", "selectedBinKey": "1800-1849"}
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        with urllib.request.urlopen(request) as response:
+            payload = json.load(response)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            set(payload), {"schemaVersion", "selectedEvidence", "generatedAt"}
+        )
+        self.assertEqual(payload["schemaVersion"], "mnemosyne.evidence.v1")
+        self.assertEqual(payload["selectedEvidence"]["binKey"], "1800-1849")
+        self.assertNotIn("bins", payload)
+        self.assertNotIn("series", payload)
 
     def test_serves_manifest_backed_evidence_images(self) -> None:
         with urllib.request.urlopen(f"{self.base_url}/v1/images/fixture-000") as response:

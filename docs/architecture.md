@@ -251,6 +251,38 @@ contribution weight, and rights status. The timeline legend identifies every
 series, supports hiding or revealing lines, and makes the selected line explicit
 before showing evidence.
 
+### 6. Static production catalog
+
+Common public visual concepts are computed offline with the same
+`SearchService` semantics. The exporter batches combined and prompt vectors in
+one bounded exact matrix pass, then serializes the live series result without
+replacing concentration lift with centroids or mean similarity.
+
+The public layout is content-addressed:
+
+```text
+data/v1/manifest.json                         # revalidating release pointer
+data/v1/releases/<fingerprint>/manifest.json  # corpus/model/metric schemas
+data/v1/releases/<fingerprint>/concepts.json  # labels, aliases, categories
+data/v1/releases/<fingerprint>/bins.json      # shared compact bin arrays
+data/v1/releases/<fingerprint>/series/<id>.json
+data/v1/releases/<fingerprint>/evidence/<id>.json
+```
+
+Series store only positive qualified point indices/values plus suppressed-bin
+indices; reliable absent bins remain implicit exact zeroes, while unreliable
+and suppressed bins remain gaps. One sparse evidence bundle per concept maps
+period indices to ordered artwork IDs and contribution weights, with card
+metadata deduplicated across periods. It is fetched only after period
+selection. This keeps a 5,000-concept catalog near 10,000 static files rather
+than multiplying concepts by all 1,703 bins.
+
+Exact labels and aliases resolve locally and always display the canonical
+concept. An alias does not pretend to be a separately encoded query. Metadata
+keyword search remains a distinct D1-backed mode. Unsupported static filters
+must use an explicitly labelled live exact path or remain unavailable; the
+default-corpus static result must never be presented as filtered.
+
 ## Service boundaries
 
 ```text
@@ -259,9 +291,11 @@ Met metadata      -> local SQLite FTS5 -> sparse date aggregation
 Permitted image URLs -> streamed embedding build -> float32 matrix + optional FAISS index
 Canonical dates   -> date build -> sparse weights + denominators
 
-Comma-separated queries -> batched local text encoder -> per-series exact retrieval
-                        -> score qualification -> gapped multi-line timeline
-                        -> selected-period strongest cards
+Concept source -> pinned text tower + completed image matrix -> immutable CDN catalog
+Public concept query -> local alias resolution -> compact static series
+                     -> lazy sparse evidence bundle
+Metadata query -> Cloudflare Worker + D1 FTS5 -> frequency series + evidence
+Optional novel/filtered query -> persistent text tower -> exact matrix retrieval
 ```
 
 The prototype can keep the `/api/search` route, but the production response

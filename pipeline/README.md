@@ -333,6 +333,44 @@ it discovers a newly returned placeholder, removes a row, or otherwise changes
 ID order, the repacker refuses to attach the old vectors; rebuild and embed that
 changed corpus instead.
 
+## Export the static concept catalog
+
+`config/concepts.json` is the versioned, editable concept dictionary. The
+exporter consumes a completed embedding bundle and runs only its manifest-pinned
+text tower. It never downloads artwork images or invokes the image encoder.
+
+```bash
+python3 -m pip install -e './service[siglip2]'
+python3 -m pipeline export-concepts \
+  --artifacts /path/to/completed-embedding-bundle \
+  --concepts config/concepts.json \
+  --output public/data/v1 \
+  --batch-size 8 \
+  --device auto \
+  --resume
+```
+
+`python3 -m pipeline.export_concepts` accepts the same arguments. The command:
+
+- verifies manifest byte counts/checksums and reuses a private local
+  verification stamp on an unchanged resume;
+- records corpus, model revision, prompt policy, metric configuration, runtime,
+  and export schemas in a content-addressed release;
+- searches combined and diagnostic prompt vectors in bounded exact row tiles;
+- writes shared bin arrays once and one compact series per concept;
+- writes at most one evidence asset per concept, with artwork metadata
+  deduplicated across periods;
+- preserves the live service's visible `strongest` evidence ordering exactly;
+- checkpoints each concept so completed work is skipped on resume.
+
+The small `public/data/v1/manifest.json` pointer may revalidate. Files beneath
+its fingerprinted `release` path are immutable and safe for a year-long CDN
+cache. Use `--concept-id` or `--limit` for a parity/smoke run; a partial run is
+reported honestly in the release manifest and does not replace the public
+pointer. Failed full runs behave the same way: their detailed errors stay in
+private run output while the release manifest contains only sanitized failure
+codes. Only a complete full-catalog run advances the pointer.
+
 ## Verify
 
 ```bash

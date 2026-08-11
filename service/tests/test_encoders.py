@@ -37,9 +37,11 @@ class Siglip2TextEncoderTests(unittest.TestCase):
             return {"input_ids": _FakeTensor([[1], [2]])}
 
         class Model:
-            @staticmethod
-            def get_text_features(*, input_ids: _FakeTensor) -> _FakeTensor:
-                return _FakeTensor([[3, 4], [0, 2]])
+            def __call__(self, *, input_ids: _FakeTensor):
+                class Output:
+                    pooler_output = _FakeTensor([[3, 4], [0, 2]])
+
+                return Output()
 
         class Torch:
             @staticmethod

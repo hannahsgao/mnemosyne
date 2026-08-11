@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from pipeline.met import build_met_corpus
+from mnemosyne_search.cache import InMemorySeriesCache
 from mnemosyne_search.met_artifacts import MetKeywordArtifacts
 from mnemosyne_search.met_client import FixtureMetClient, SqliteMetClient
 from mnemosyne_search.met_service import MetKeywordConfig, MetKeywordSearchService
@@ -139,6 +140,12 @@ class MetKeywordSearchTests(unittest.TestCase):
         self.service.search(SearchRequest(query="lion, horse"))
         self.assertEqual(self.client.search_calls, [("horse", "broad"), ("lion", "broad")])
 
+    def test_preserves_an_empty_injected_cache(self) -> None:
+        cache = InMemorySeriesCache(max_entries=2)
+        service = MetKeywordSearchService(self.artifacts, self.client, cache=cache)
+
+        self.assertIs(service.cache, cache)
+
     def test_local_fts_supports_phrase_title_and_tag_search(self) -> None:
         self.assertEqual(self.client.search("horse one", "title"), (10,))
         self.assertEqual(self.client.search("horse", "title"), (10, 11))
@@ -153,11 +160,44 @@ class MetKeywordSearchTests(unittest.TestCase):
                 selected_bin_key="1880:1889",
             )
         )
-        cards = response["selectedEvidence"]["slices"]["randomContributors"]
+        slices = response["selectedEvidence"]["slices"]
+        cards = slices["strongest"]
         self.assertEqual({card["artworkId"] for card in cards}, {"MET_10", "MET_11"})
+        self.assertEqual(slices["randomContributors"], cards)
         self.assertTrue(all(not card["imageUrl"] for card in cards))
         self.assertTrue(all(card["rawScore"] is None for card in cards))
         self.assertEqual(set(self.client.object_calls), {10, 11})
+
+    def test_evidence_response_reuses_cached_matches_and_omits_timeline(self) -> None:
+        parsed = self.service.search(SearchRequest(query="horse, lion"))
+        horse_id = parsed["queries"][0]["id"]
+        search_calls = list(self.client.search_calls)
+
+        response = self.service.evidence(
+            SearchRequest(
+                query="horse, lion",
+                selected_query_id=horse_id,
+                selected_bin_key="1880:1889",
+            )
+        )
+
+        self.assertEqual(
+            set(response), {"schemaVersion", "selectedEvidence", "generatedAt"}
+        )
+        self.assertEqual(response["schemaVersion"], "mnemosyne.evidence.v1")
+        self.assertEqual(response["generatedAt"], "2026-08-03T00:00:00Z")
+        self.assertNotIn("bins", response)
+        self.assertNotIn("series", response)
+        self.assertEqual(self.client.search_calls, search_calls)
+        evidence = response["selectedEvidence"]
+        self.assertIsNotNone(evidence)
+        assert evidence is not None
+        self.assertEqual(evidence["queryId"], horse_id)
+        self.assertEqual(evidence["binKey"], "1880:1889")
+        self.assertEqual(
+            evidence["slices"]["strongest"],
+            evidence["slices"]["randomContributors"],
+        )
 
     def test_separate_evidence_client_supplies_image_metadata(self) -> None:
         evidence_client = FixtureMetClient(
@@ -184,12 +224,14 @@ class MetKeywordSearchTests(unittest.TestCase):
         response = service.search(
             SearchRequest(query="horse", selected_bin_key="1880:1889")
         )
-        cards = response["selectedEvidence"]["slices"]["randomContributors"]
+        slices = response["selectedEvidence"]["slices"]
+        cards = slices["strongest"]
 
         self.assertEqual(
             {card["imageUrl"] for card in cards},
             {"https://images.example/10.jpg", "https://images.example/11.jpg"},
         )
+        self.assertEqual(slices["randomContributors"], cards)
         self.assertEqual(set(evidence_client.object_calls), {10, 11})
 
     def test_filter_recomputes_the_denominator_and_cache_key(self) -> None:
@@ -208,7 +250,9 @@ class MetKeywordSearchTests(unittest.TestCase):
         response = self.service.search(SearchRequest(query="none"))
         self.assertTrue(all(point["value"] == 0 for point in response["series"][0]["points"]))
         self.assertTrue(any("No eligible corpus matches" in warning for warning in response["warnings"]))
-        self.assertEqual(response["selectedEvidence"]["slices"]["randomContributors"], [])
+        slices = response["selectedEvidence"]["slices"]
+        self.assertEqual(slices["strongest"], [])
+        self.assertEqual(slices["randomContributors"], [])
 
 
 if __name__ == "__main__":

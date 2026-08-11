@@ -113,7 +113,8 @@ class Siglip2TextEncoder:
     ) -> None:
         try:
             import torch
-            from transformers import AutoModel, AutoTokenizer
+            import transformers
+            from transformers import AutoTokenizer, SiglipTextModel
         except ImportError as error:  # pragma: no cover - optional production dependency
             raise RuntimeError(
                 "Siglip2TextEncoder requires the 'siglip2' optional dependencies"
@@ -122,6 +123,11 @@ class Siglip2TextEncoder:
         self.model_id = model_id
         self.model_version = revision
         self._torch = torch
+        self.runtime_versions = {
+            "torch": str(torch.__version__),
+            "transformers": str(transformers.__version__),
+            "numpy": str(np.__version__),
+        }
         if device == "auto":
             if torch.cuda.is_available():
                 device = "cuda"
@@ -142,12 +148,16 @@ class Siglip2TextEncoder:
             local_files_only=local_files_only,
             use_fast=True,
         )
-        self._model = AutoModel.from_pretrained(
+        # This checkpoint advertises ``model_type: siglip`` and its standalone
+        # request-time tower is ``SiglipTextModel``.  Loading ``AutoModel`` here
+        # materializes the unused vision tower as well as the text tower.
+        self._model = SiglipTextModel.from_pretrained(
             model_id, revision=revision, local_files_only=local_files_only
         ).to(device)
         self._model.eval()
-        text_config = getattr(self._model.config, "text_config", None)
-        self._text_max_length = getattr(text_config, "max_position_embeddings", None)
+        self._text_max_length = getattr(
+            self._model.config, "max_position_embeddings", None
+        )
         if (
             isinstance(self._text_max_length, bool)
             or not isinstance(self._text_max_length, int)
@@ -175,5 +185,6 @@ class Siglip2TextEncoder:
         )
         inputs = {key: value.to(self._device) for key, value in inputs.items()}
         with self._torch.inference_mode():
-            features = self._model.get_text_features(**inputs)
+            output = self._model(**inputs)
+            features = output.pooler_output
         return l2_normalize(features.detach().float().cpu().numpy())

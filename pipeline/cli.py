@@ -14,6 +14,7 @@ from .embeddings import DeterministicTestEncoder, Siglip2LocalEncoder, build_emb
 from .met import MET_API_BASE, build_met_corpus
 from .met_visual import DEFAULT_MAX_IMAGE_BYTES, prepare_met_visual_subset
 from .repack import repack_embedded_bundle
+from .export_concepts import add_arguments as add_export_concept_arguments
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -173,6 +174,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="copy an aligned existing exact FAISS index after validating it",
     )
+    export_concepts = subparsers.add_parser(
+        "export-concepts",
+        help="export compact static concept timelines from completed embeddings",
+    )
+    add_export_concept_arguments(export_concepts)
     return parser
 
 
@@ -283,6 +289,16 @@ def main(argv: list[str] | None = None) -> int:
                 args.output,
                 copy_faiss=args.copy_faiss,
             )
+        elif args.command == "export-concepts":
+            from .export_concepts import run as run_export_concepts
+
+            return_code_payload = run_export_concepts(args)
+            print(
+                json.dumps(
+                    return_code_payload, ensure_ascii=False, indent=2, sort_keys=True
+                )
+            )
+            return 1 if return_code_payload["run"]["failures"] else 0
         else:
             return 2
     except (CorpusBuildError, ValueError) as exc:

@@ -36,6 +36,15 @@ class ExactIndexTests(unittest.TestCase):
         hits = index.search(np.asarray([[1, 0]], dtype=np.float32), 2)
         self.assertEqual(hits.indices.tolist(), [[0, 1]])
 
+    def test_blocked_top_k_accumulates_when_k_exceeds_first_block(self) -> None:
+        index = NumpyFlatIPIndex(self.embeddings)
+        index.block_size = 2
+
+        hits = index.search(np.asarray([[1, 0]], dtype=np.float32), 3)
+
+        self.assertEqual(hits.indices.tolist(), [[0, 1, 2]])
+        np.testing.assert_allclose(hits.scores, [[1, 0.8, 0]], atol=1e-6)
+
     def test_factory_has_working_numpy_fallback(self) -> None:
         index = create_exact_index(self.embeddings, prefer_faiss=False)
         self.assertEqual(index.backend, "numpy-flat-ip")

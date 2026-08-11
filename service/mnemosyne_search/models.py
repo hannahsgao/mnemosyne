@@ -149,4 +149,10 @@ class SearchResponse(TypedDict):
     generatedAt: str
 
 
+class EvidenceResponse(TypedDict):
+    schemaVersion: str
+    selectedEvidence: SelectedEvidenceJSON | None
+    generatedAt: str
+
+
 JSONValue = str | int | float | bool | None | list[Any] | dict[str, Any]

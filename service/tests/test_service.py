@@ -109,6 +109,20 @@ class SearchServiceTests(unittest.TestCase):
             [response["queries"][0]["id"], response["queries"][1]["id"]],
         )
 
+    def test_preserves_an_empty_injected_cache(self) -> None:
+        cache: InMemorySeriesCache = InMemorySeriesCache(max_entries=2)
+        service = SearchService(
+            self.artifacts,
+            self.encoder,
+            prompt_ensemble=PromptEnsemble(
+                version="fixture-prompts-v1", templates=("{query}",)
+            ),
+            prefer_faiss=False,
+            cache=cache,
+        )
+
+        self.assertIs(service.cache, cache)
+
     def test_selects_requested_series_and_bin_for_evidence(self) -> None:
         parsed = self.service.search(SearchRequest(query="horse, train"))
         train_id = parsed["queries"][1]["id"]
@@ -128,6 +142,34 @@ class SearchServiceTests(unittest.TestCase):
         self.assertTrue(evidence["slices"]["strongest"][0]["contributor"])
         self.assertTrue(evidence["slices"]["bestNonContributors"])
         self.assertTrue(evidence["slices"]["randomDenominator"])
+
+    def test_evidence_response_reuses_cached_series_and_omits_timeline(self) -> None:
+        parsed = self.service.search(SearchRequest(query="horse, train"))
+        train_id = parsed["queries"][1]["id"]
+        encoder_calls = list(self.encoder.calls)
+
+        response = self.service.evidence(
+            SearchRequest(
+                query="horse, train",
+                selected_query_id=train_id,
+                selected_bin_key="1900-1949",
+            )
+        )
+
+        self.assertEqual(
+            set(response), {"schemaVersion", "selectedEvidence", "generatedAt"}
+        )
+        self.assertEqual(response["schemaVersion"], "mnemosyne.evidence.v1")
+        self.assertEqual(response["generatedAt"], "2026-08-03T12:00:00Z")
+        self.assertNotIn("bins", response)
+        self.assertNotIn("series", response)
+        self.assertEqual(self.encoder.calls, encoder_calls)
+        evidence = response["selectedEvidence"]
+        self.assertIsNotNone(evidence)
+        assert evidence is not None
+        self.assertEqual(evidence["queryId"], train_id)
+        self.assertEqual(evidence["binKey"], "1900-1949")
+        self.assertEqual(evidence["slices"]["strongest"][0]["artworkId"], "fixture-004")
 
     def test_evidence_uses_a_stricter_tail_than_the_timeline(self) -> None:
         service = SearchService(
@@ -256,6 +298,40 @@ class SearchServiceTests(unittest.TestCase):
         self.assertEqual(filtered["corpus"]["count"], 4)
         self.assertEqual([item["denominator"] for item in filtered["bins"]], [3.0, 1.0, 0.0])
         self.assertNotEqual(unfiltered["series"][0]["cacheKey"], filtered["series"][0]["cacheKey"])
+
+    def test_filter_values_are_trimmed_before_matching(self) -> None:
+        plain = self.service.search(
+            SearchRequest(query="horse", filters={"institution": ("The Met",)})
+        )
+        padded = self.service.search(
+            SearchRequest(query="horse", filters={"institution": ("  The Met  ",)})
+        )
+
+        self.assertEqual(plain["corpus"], padded["corpus"])
+        self.assertEqual(plain["series"], padded["series"])
+
+    def test_cache_key_versions_reliability_and_diagnostic_settings(self) -> None:
+        baseline = self.service.search(SearchRequest(query="horse"))["series"][0][
+            "cacheKey"
+        ]
+        changed = SearchService(
+            self.artifacts,
+            self.encoder,
+            prompt_ensemble=PromptEnsemble(
+                version="fixture-prompts-v1", templates=("{query}",)
+            ),
+            config=SearchConfig(
+                percentile=0.1,
+                evidence_percentile=0.1,
+                minimum_denominator=2,
+                minimum_evidence_clusters=1,
+                minimum_bin_evidence_clusters=1,
+                control_sample_size=2,
+            ),
+            prefer_faiss=False,
+        ).search(SearchRequest(query="horse"))["series"][0]["cacheKey"]
+
+        self.assertNotEqual(baseline, changed)
 
     def test_diagnostics_can_mark_and_explain_low_signal(self) -> None:
         strict_service = SearchService(

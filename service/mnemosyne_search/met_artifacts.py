@@ -13,6 +13,7 @@ from .artifacts import (
     Bin,
     ResolvedCorpus,
     SparseDateWeights,
+    RUNTIME_METADATA_FIELDS,
     load_bin_counts,
     load_denominators,
     load_metadata,
@@ -60,7 +61,25 @@ class MetKeywordArtifacts:
         keyword_index_path = (base / str(keyword_index_name)).resolve()
         if not keyword_index_path.is_file():
             raise ValueError("manifest-declared Met FTS index does not exist")
-        metadata = load_metadata(base / files["metadata"])
+        allowed_filter_fields = frozenset(
+            manifest.get(
+                "allowedFilterFields",
+                [
+                    "department",
+                    "objectType",
+                    "medium",
+                    "culture",
+                    "classification",
+                    "period",
+                    "dynasty",
+                    "publicDomain",
+                ],
+            )
+        )
+        metadata = load_metadata(
+            base / files["metadata"],
+            fields=RUNTIME_METADATA_FIELDS | allowed_filter_fields,
+        )
         weight_path = base / files["dateWeights"]
         weights = (
             SparseDateWeights.from_npz(weight_path)
@@ -137,21 +156,7 @@ class MetKeywordArtifacts:
             default_cluster_counts=default_cluster_counts,
             cluster_ids=cluster_ids,
             source_id_to_row=source_id_to_row,
-            allowed_filter_fields=frozenset(
-                manifest.get(
-                    "allowedFilterFields",
-                    [
-                        "department",
-                        "objectType",
-                        "medium",
-                        "culture",
-                        "classification",
-                        "period",
-                        "dynasty",
-                        "publicDomain",
-                    ],
-                )
-            ),
+            allowed_filter_fields=allowed_filter_fields,
         )
 
     def resolve_corpus(
@@ -160,7 +165,9 @@ class MetKeywordArtifacts:
         if view != "all":
             raise ValueError("Met keyword artifacts currently expose only the 'all' corpus view")
         normalized_filters = {
-            key: tuple(sorted({value.casefold() for value in values if value.strip()}))
+            key: tuple(
+                sorted({value.strip().casefold() for value in values if value.strip()})
+            )
             for key, values in sorted(filters.items())
         }
         unknown_fields = set(normalized_filters) - self.allowed_filter_fields

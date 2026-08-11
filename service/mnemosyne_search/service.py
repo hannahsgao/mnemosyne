@@ -20,6 +20,7 @@ from .models import (
     BinJSON,
     DiagnosticsJSON,
     EvidenceCardJSON,
+    EvidenceResponse,
     EvidenceSlicesJSON,
     PointJSON,
     QueryTerm,
@@ -32,6 +33,7 @@ from .prompting import EncodedSeries, PromptEnsemble
 
 
 SCHEMA_VERSION = "mnemosyne.search.v1"
+EVIDENCE_SCHEMA_VERSION = "mnemosyne.evidence.v1"
 METRIC_ID = "score-qualified-visual-concentration-lift"
 
 
@@ -135,7 +137,7 @@ class SearchService:
         config: SearchConfig | None = None,
         index: ExactIndex | None = None,
         cache: InMemorySeriesCache[SeriesComputation] | None = None,
-        prefer_faiss: bool = True,
+        prefer_faiss: bool = False,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.artifacts = artifacts
@@ -146,12 +148,16 @@ class SearchService:
             raise ValueError(
                 "text encoder model id/version must match the offline image-embedding artifact"
             )
-        self.index = index or create_exact_index(
-            artifacts.embeddings,
-            prefer_faiss=prefer_faiss,
-            faiss_index_path=artifacts.faiss_index_path,
+        self.index = (
+            index
+            if index is not None
+            else create_exact_index(
+                artifacts.embeddings,
+                prefer_faiss=prefer_faiss,
+                faiss_index_path=artifacts.faiss_index_path,
+            )
         )
-        self.cache = cache or InMemorySeriesCache()
+        self.cache = cache if cache is not None else InMemorySeriesCache()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._series_lock = RLock()
 
@@ -247,6 +253,46 @@ class SearchService:
             "generatedAt": self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
 
+    def evidence(self, request: SearchRequest) -> EvidenceResponse:
+        """Return selected-period evidence without serializing the timeline again."""
+
+        terms = parse_query(request.query)
+        corpus = self.artifacts.resolve_corpus(request.corpus_view, request.filters)
+
+        selected_index = 0
+        if request.selected_query_id is not None:
+            matching = [
+                index
+                for index, term in enumerate(terms)
+                if term.id == request.selected_query_id
+            ]
+            if not matching:
+                raise ValueError("selectedQueryId does not name a parsed query series")
+            selected_index = matching[0]
+        selected_term = terms[selected_index]
+        # Only the selected series is needed. If a preceding timeline request
+        # filled the cache this is a lookup; direct calls avoid encoding the
+        # other comma-separated terms altogether.
+        selected_computation = self._series((selected_term,), corpus)[0]
+        bin_index = self._selected_bin_index(
+            request.selected_bin_key, selected_computation, corpus
+        )
+        selected_evidence = (
+            self._evidence_payload(
+                selected_term, selected_computation, corpus, bin_index
+            )
+            if bin_index is not None
+            else None
+        )
+        return {
+            "schemaVersion": EVIDENCE_SCHEMA_VERSION,
+            "selectedEvidence": selected_evidence,
+            "generatedAt": self.clock()
+            .astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+
     def _series(
         self, terms: Sequence[QueryTerm], corpus: ResolvedCorpus
     ) -> list[SeriesComputation]:
@@ -270,26 +316,33 @@ class SearchService:
                     encoded = self.prompt_ensemble.encode(missing_terms, self.encoder)
                     index_filter = self._index_filter(corpus)
                     k = max(1, math.ceil(self.config.percentile * len(corpus.row_ids)))
-                    vectors = np.stack([item.combined for item in encoded]).astype(np.float32)
-                    hits = self.index.search(vectors, k, eligible_indices=index_filter)
-
-                    # Search every prompt variant in one index call. Previously
-                    # diagnostics performed three additional full searches per term.
                     prompt_counts = [len(item.prompt_vectors) for item in encoded]
-                    prompt_vectors = np.stack(
-                        [vector for item in encoded for vector in item.prompt_vectors]
+                    combined_count = len(encoded)
+                    # The combined query and every prompt diagnostic share one
+                    # bounded exact matrix pass.  Splitting them into two calls
+                    # rereads the entire memory-mapped artwork matrix.
+                    search_vectors = np.stack(
+                        [item.combined for item in encoded]
+                        + [
+                            vector
+                            for item in encoded
+                            for vector in item.prompt_vectors
+                        ]
                     ).astype(np.float32)
-                    prompt_hits = self.index.search(
-                        prompt_vectors, k, eligible_indices=index_filter
-                    ).indices
+                    all_hits = self.index.search(
+                        search_vectors, k, eligible_indices=index_filter
+                    )
+                    hit_indices = all_hits.indices[:combined_count]
+                    hit_scores = all_hits.scores[:combined_count]
+                    prompt_hits = all_hits.indices[combined_count:]
                     prompt_offset = 0
                     for batch_index, original_position in enumerate(missing_positions):
                         prompt_count = prompt_counts[batch_index]
                         result = self._aggregate_one(
                             missing_terms[batch_index],
                             encoded[batch_index],
-                            hits.indices[batch_index],
-                            hits.scores[batch_index],
+                            hit_indices[batch_index],
+                            hit_scores[batch_index],
                             prompt_hits[prompt_offset : prompt_offset + prompt_count],
                             corpus,
                             keys[original_position],
@@ -312,11 +365,18 @@ class SearchService:
                 "promptTemplateVersion": self.prompt_ensemble.version,
                 "metricId": METRIC_ID,
                 "metricVersion": self.config.metric_version,
+                "schemaVersion": SCHEMA_VERSION,
                 "percentile": self.config.percentile,
                 "evidencePercentile": self.config.evidence_percentile,
                 "minimumEvidenceScore": self.config.minimum_evidence_score,
                 "minimumEvidenceClusters": self.config.minimum_evidence_clusters,
                 "minimumBinEvidenceClusters": self.config.minimum_bin_evidence_clusters,
+                "minimumDenominator": self.config.minimum_denominator,
+                "minimumStandardizedSeparation": (
+                    self.config.minimum_standardized_separation
+                ),
+                "minimumPromptJaccard": self.config.minimum_prompt_jaccard,
+                "controlSampleSize": self.config.control_sample_size,
                 "countingUnit": self.artifacts.counting_unit,
             }
         )

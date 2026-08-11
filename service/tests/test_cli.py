@@ -11,13 +11,14 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class CommandLineTests(unittest.TestCase):
-    def test_macos_siglip_defaults_to_stable_exact_numpy_backend(self) -> None:
+    def test_siglip_defaults_to_bounded_exact_numpy_backend(self) -> None:
         base = ["--artifacts", str(FIXTURES), "--siglip2"]
         args = build_parser().parse_args(base)
         self.assertFalse(_prefer_faiss(args, platform="darwin"))
-        self.assertTrue(_prefer_faiss(args, platform="linux"))
+        self.assertFalse(_prefer_faiss(args, platform="linux"))
         forced = build_parser().parse_args([*base, "--force-faiss"])
         self.assertTrue(_prefer_faiss(forced, platform="darwin"))
+        self.assertTrue(_prefer_faiss(forced, platform="linux"))
 
     def test_keyboard_interrupt_stops_without_a_traceback(self) -> None:
         with patch("mnemosyne_search.cli.serve", side_effect=KeyboardInterrupt):

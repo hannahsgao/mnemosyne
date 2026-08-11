@@ -1,15 +1,47 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Timeline } from "../components/Timeline";
-import { MAX_QUERY_LENGTH, parseConceptQuery, QuerySyntaxError } from "../lib/query";
 import {
+  type FormEvent,
+  type KeyboardEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { Timeline } from "../components/Timeline";
+import {
+  defaultConceptSelection,
+  loadConceptCatalog,
+  loadConceptEvidence,
+  loadConceptSearch,
+  resolveConcept,
+  suggestConcepts,
+  UnknownConceptError,
+  type ConceptCatalog,
+  type ConceptResolution,
+  type ConceptSuggestion,
+} from "../lib/concept-catalog";
+import { selectedEvidenceItems } from "../lib/evidence";
+import {
+  activeQueryFragment,
+  evidenceMatchesSelection,
+  formatQueryTerm,
+  invalidSearchStatus,
+  invalidateExplorerRequests,
+  prepareEvidenceRequest,
+  replaceActiveQueryFragment,
+  retryablePromise,
+  searchErrorPlacement,
+} from "../lib/explorer-state";
+import { MAX_QUERY_LENGTH, normalizeQueryTerm, parseConceptQuery, QuerySyntaxError } from "../lib/query";
+import {
+  buildEvidenceUrl,
   buildSearchUrl,
   DEFAULT_SEARCH_MODE,
-  pageUrlForSearchMode,
+  pageUrlForSearchState,
   SEARCH_MODE_LABELS,
   SEARCH_MODES,
-  searchModeFromUrl,
+  searchPageStateFromUrl,
   type SearchMode,
 } from "../lib/search-mode";
 import { formatTimelineYear, peakSelection, pointForBin, timelineWindow } from "../lib/timeline";
@@ -17,17 +49,41 @@ import type {
   ChartSelection,
   EvidenceArtwork,
   SearchResponse,
+  SelectedEvidence,
 } from "../lib/types";
 
-const INITIAL_QUERY = "horse, ship";
+const INITIAL_QUERY = "Horse, Ship";
 const EXAMPLE_QUERIES = [
-  "industry, machine, skyscraper",
-  "railroad, automobile, airplane",
-  "photography, poster, newspaper",
-  "plastic, radio, television",
-  "war, revolution",
+  "Flowers, Mountain, Moon",
+  "Portrait, Mother and child",
+  "Armor, Sword, Crown",
+  "Landscape, Geometric ornament",
+  "Battle, Procession",
 ];
 const INITIAL_VISIBLE_WORKS = 5;
+
+type SearchOptions = {
+  syncInput?: boolean;
+  requestedSelection?: ChartSelection | null;
+};
+
+type EvidenceEnvelope = {
+  schemaVersion: "mnemosyne.evidence.v1";
+  selectedEvidence: SelectedEvidence | null;
+  generatedAt: string;
+};
+
+type EvidenceContext = {
+  baseResult?: SearchResponse;
+  catalog?: ConceptCatalog;
+  query?: string;
+  mode?: SearchMode;
+};
+
+type UnknownPrompt = {
+  input: string;
+  suggestions: ConceptSuggestion[];
+};
 
 function isSearchResponse(value: unknown): value is SearchResponse {
   if (!value || typeof value !== "object") return false;
@@ -42,24 +98,19 @@ function isSearchResponse(value: unknown): value is SearchResponse {
   );
 }
 
-function selectedEvidenceItems(response: SearchResponse | null, selection: ChartSelection | null) {
-  if (
-    !response?.selectedEvidence ||
-    !selection ||
-    response.selectedEvidence.queryId !== selection.queryId ||
-    response.selectedEvidence.binKey !== selection.binKey
-  ) {
-    return [];
-  }
+function isEvidenceEnvelope(value: unknown): value is EvidenceEnvelope {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<EvidenceEnvelope>;
+  return (
+    candidate.schemaVersion === "mnemosyne.evidence.v1" &&
+    (candidate.selectedEvidence === null || typeof candidate.selectedEvidence === "object")
+  );
+}
 
-  const seen = new Set<string>();
-  const selected: EvidenceArtwork[] = [];
-  for (const artwork of response.selectedEvidence.slices.strongest) {
-    if (!artwork || seen.has(artwork.artworkId)) continue;
-    seen.add(artwork.artworkId);
-    selected.push(artwork);
-  }
-  return selected;
+function errorMessage(payload: unknown, fallback: string) {
+  return payload && typeof payload === "object" && "error" in payload
+    ? String(payload.error)
+    : fallback;
 }
 
 function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
@@ -75,197 +126,309 @@ function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
       </div>
       <div className="artwork-copy">
         <strong title={artwork.title}>{artwork.title}</strong>
-        <span title={artwork.artist}>{artwork.artist}</span>
+        <span title={artwork.artist}>{artwork.artist || "Unknown artist"}</span>
         <small>{artwork.dateDisplay} ↗</small>
       </div>
     </a>
   );
 }
 
-function replacePageSearchMode(mode: SearchMode) {
-  const nextUrl = pageUrlForSearchMode(window.location.href, mode);
-  window.history.replaceState(window.history.state, "", nextUrl);
+function urlSelection(selection: ChartSelection | null, mode: SearchMode) {
+  if (!selection || mode !== "embedding") return selection;
+  return { ...selection, queryId: selection.queryId.replace(/^concept:/, "") };
+}
+
+function selectionFromRequestedState(
+  response: SearchResponse,
+  requested: ChartSelection | null | undefined,
+  mode: SearchMode,
+) {
+  if (!requested) return null;
+  const queryId = mode === "embedding" && !requested.queryId.startsWith("concept:")
+    ? `concept:${requested.queryId}`
+    : requested.queryId;
+  const series = response.series.find((item) => item.queryId === queryId);
+  if (!series?.points.some((point) => point.binKey === requested.binKey)) return null;
+  if (response.bins.find((bin) => bin.key === requested.binKey)?.belowMinimumDenominator === true) {
+    return null;
+  }
+  return { queryId, binKey: requested.binKey };
+}
+
+function replaceUnknownQueryTerm(value: string, unknown: string, replacement: string) {
+  try {
+    const unknownNormalized = normalizeQueryTerm(unknown);
+    return parseConceptQuery(value)
+      .map((term) => term.normalized === unknownNormalized ? replacement : term.label)
+      .map(formatQueryTerm)
+      .join(", ");
+  } catch {
+    return replacement;
+  }
 }
 
 export default function Home() {
   const [input, setInput] = useState(INITIAL_QUERY);
   const [submittedQuery, setSubmittedQuery] = useState(INITIAL_QUERY);
   const [searchMode, setSearchMode] = useState<SearchMode>(DEFAULT_SEARCH_MODE);
-  const [submittedSearchMode, setSubmittedSearchMode] =
-    useState<SearchMode>(DEFAULT_SEARCH_MODE);
+  const [submittedSearchMode, setSubmittedSearchMode] = useState<SearchMode>(DEFAULT_SEARCH_MODE);
   const [result, setResult] = useState<SearchResponse | null>(null);
   const [selection, setSelection] = useState<ChartSelection | null>(null);
+  const [resolutions, setResolutions] = useState<ConceptResolution[]>([]);
+  const [unknownPrompt, setUnknownPrompt] = useState<UnknownPrompt | null>(null);
   const [hiddenQueryIds, setHiddenQueryIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [showAllExamples, setShowAllExamples] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
+  const [catalog, setCatalog] = useState<ConceptCatalog | null>(null);
+  const [autocompleteOpen, setAutocompleteOpen] = useState(false);
+  const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0);
   const requestId = useRef(0);
   const evidenceRequestId = useRef(0);
   const searchAbort = useRef<AbortController | null>(null);
   const evidenceAbort = useRef<AbortController | null>(null);
+  const catalogPromise = useRef<Promise<ConceptCatalog> | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  async function ensureCatalog() {
+    const loaded = await retryablePromise(catalogPromise, () => loadConceptCatalog());
+    setCatalog((current) => current ?? loaded);
+    return loaded;
+  }
+
+  function replacePageState(query: string, mode: SearchMode, nextSelection: ChartSelection | null) {
+    const nextUrl = pageUrlForSearchState(window.location.href, {
+      query,
+      mode,
+      selection: urlSelection(nextSelection, mode),
+    });
+    window.history.replaceState(window.history.state, "", nextUrl);
+  }
 
   async function search(
     nextQuery: string,
     nextMode: SearchMode = searchMode,
-    options: { syncInput?: boolean } = {},
+    options: SearchOptions = {},
   ) {
+    const invalidated = invalidateExplorerRequests(
+      requestId.current,
+      evidenceRequestId.current,
+      searchAbort.current,
+      evidenceAbort.current,
+    );
+    requestId.current = invalidated.searchRequestId;
+    evidenceRequestId.current = invalidated.evidenceRequestId;
+    searchAbort.current = null;
+    evidenceAbort.current = null;
+    const currentRequest = invalidated.searchRequestId;
+
+    let parsed;
     try {
-      parseConceptQuery(nextQuery);
+      parsed = parseConceptQuery(nextQuery);
     } catch (caught) {
-      setError(caught instanceof QuerySyntaxError ? caught.message : "Check the query and try again.");
+      const status = invalidSearchStatus(
+        caught instanceof QuerySyntaxError ? caught.message : "Check the query and try again.",
+      );
+      setError(status.error);
+      setLoading(status.loading);
+      setEvidenceLoading(status.evidenceLoading);
+      setEvidenceError(null);
+      setUnknownPrompt(null);
+      setAutocompleteOpen(false);
       return;
     }
 
-    const currentRequest = ++requestId.current;
-    evidenceRequestId.current += 1;
-    searchAbort.current?.abort();
-    evidenceAbort.current?.abort();
+    const trimmedQuery = nextQuery.trim();
     const controller = new AbortController();
     searchAbort.current = controller;
-    replacePageSearchMode(nextMode);
+    replacePageState(trimmedQuery, nextMode, null);
     setSearchMode(nextMode);
     setSubmittedSearchMode(nextMode);
-    if (options.syncInput !== false) setInput(nextQuery.trim());
-    setSubmittedQuery(nextQuery.trim());
+    if (options.syncInput !== false) setInput(trimmedQuery);
+    setSubmittedQuery(trimmedQuery);
     setLoading(true);
     setEvidenceLoading(false);
     setError(null);
+    setEvidenceError(null);
+    setUnknownPrompt(null);
+    setResolutions([]);
     setSelection(null);
     setShowAllExamples(false);
     setHiddenQueryIds(new Set());
+    setAutocompleteOpen(false);
 
     try {
-      const response = await fetch(buildSearchUrl(nextQuery.trim(), nextMode), {
-        signal: controller.signal,
-      });
-      const payload: unknown = await response.json();
-      if (!response.ok) {
-        const message =
-          payload && typeof payload === "object" && "error" in payload
-            ? String(payload.error)
-            : "Search failed.";
-        throw new Error(message);
-      }
-      if (!isSearchResponse(payload)) throw new Error("The search service returned an unsupported response.");
-      if (requestId.current !== currentRequest) return;
+      let payload: SearchResponse;
+      let loadedCatalog: ConceptCatalog | undefined;
+      let nextResolutions: ConceptResolution[] = [];
 
-      const nextSelection = payload.selectedEvidence
-        ? {
-            queryId: payload.selectedEvidence.queryId,
-            binKey: payload.selectedEvidence.binKey,
+      if (nextMode === "embedding") {
+        loadedCatalog = await ensureCatalog();
+        nextResolutions = parsed.map((term) => {
+          const resolved = resolveConcept(loadedCatalog!, term.label);
+          if (!resolved) {
+            throw new UnknownConceptError(term.label, suggestConcepts(loadedCatalog!, term.label, 4));
           }
-        : peakSelection(payload);
+          return resolved;
+        });
+        payload = await loadConceptSearch(loadedCatalog, nextResolutions);
+      } else {
+        const response = await fetch(buildSearchUrl(trimmedQuery, nextMode), {
+          signal: controller.signal,
+        });
+        const body: unknown = await response.json();
+        if (!response.ok) throw new Error(errorMessage(body, "Search failed."));
+        if (!isSearchResponse(body)) throw new Error("The search service returned an unsupported response.");
+        payload = body;
+      }
+
+      if (requestId.current !== currentRequest) return;
+      const requestedSelection = selectionFromRequestedState(
+        payload,
+        options.requestedSelection,
+        nextMode,
+      );
+      const nextSelection = requestedSelection ?? (
+        nextMode === "embedding" && loadedCatalog
+          ? defaultConceptSelection(loadedCatalog, payload)
+          : payload.selectedEvidence
+            ? { queryId: payload.selectedEvidence.queryId, binKey: payload.selectedEvidence.binKey }
+            : peakSelection(payload)
+      );
+      setResolutions(nextResolutions);
       setResult(payload);
       setSelection(nextSelection);
+      replacePageState(trimmedQuery, nextMode, nextSelection);
+      if (nextSelection && !evidenceMatchesSelection(payload.selectedEvidence, nextSelection)) {
+        void Promise.resolve().then(() => {
+          if (requestId.current !== currentRequest) return;
+          void loadEvidence(nextSelection, {
+            baseResult: payload,
+            catalog: loadedCatalog,
+            query: trimmedQuery,
+            mode: nextMode,
+          });
+        });
+      }
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") return;
       if (requestId.current !== currentRequest) return;
+      if (caught instanceof UnknownConceptError) {
+        setUnknownPrompt({ input: caught.input, suggestions: caught.suggestions });
+      }
       setError(caught instanceof Error ? caught.message : "Search failed.");
       setResult(null);
       setSelection(null);
+      setResolutions([]);
     } finally {
       if (requestId.current === currentRequest) setLoading(false);
     }
   }
 
-  async function loadEvidence(nextSelection: ChartSelection) {
-    if (
-      selection?.queryId !== nextSelection.queryId ||
-      selection?.binKey !== nextSelection.binKey
-    ) {
+  async function loadEvidence(nextSelection: ChartSelection, context: EvidenceContext = {}) {
+    if (selection?.queryId !== nextSelection.queryId || selection?.binKey !== nextSelection.binKey) {
       setShowAllExamples(false);
     }
     setSelection(nextSelection);
-    if (
-      result?.selectedEvidence?.queryId === nextSelection.queryId &&
-      result.selectedEvidence.binKey === nextSelection.binKey
-    ) {
-      return;
-    }
+    const activeQuery = context.query ?? submittedQuery;
+    const activeMode = context.mode ?? submittedSearchMode;
+    replacePageState(activeQuery, activeMode, nextSelection);
+    const activeResult = context.baseResult ?? result;
+    const cached = evidenceMatchesSelection(activeResult?.selectedEvidence, nextSelection);
+    const prepared = prepareEvidenceRequest(
+      evidenceRequestId.current,
+      evidenceAbort.current,
+      cached,
+    );
+    evidenceRequestId.current = prepared.requestId;
+    evidenceAbort.current = prepared.controller;
+    setEvidenceLoading(prepared.loading);
+    setEvidenceError(null);
+    if (cached) return;
 
-    const currentRequest = ++evidenceRequestId.current;
-    evidenceAbort.current?.abort();
-    const controller = new AbortController();
-    evidenceAbort.current = controller;
-    setEvidenceLoading(true);
-    setError(null);
+    const currentRequest = prepared.requestId;
+    const controller = prepared.controller!;
     try {
-      const response = await fetch(
-        buildSearchUrl(submittedQuery, submittedSearchMode, nextSelection),
-        {
-          signal: controller.signal,
-        },
-      );
-      const payload: unknown = await response.json();
-      if (!response.ok) {
-        const message =
-          payload && typeof payload === "object" && "error" in payload
-            ? String(payload.error)
-            : "Evidence could not be loaded.";
-        throw new Error(message);
+      let selectedEvidence: SelectedEvidence | null;
+      if (activeMode === "embedding") {
+        const activeCatalog = context.catalog ?? catalog ?? await ensureCatalog();
+        selectedEvidence = await loadConceptEvidence(
+          activeCatalog,
+          nextSelection.queryId,
+          nextSelection.binKey,
+        );
+      } else {
+        const response = await fetch(
+          buildEvidenceUrl(activeQuery, activeMode, nextSelection),
+          { signal: controller.signal },
+        );
+        const payload: unknown = await response.json();
+        if (!response.ok) throw new Error(errorMessage(payload, "Evidence could not be loaded."));
+        if (!isEvidenceEnvelope(payload)) {
+          throw new Error("The evidence service returned unsupported evidence.");
+        }
+        selectedEvidence = payload.selectedEvidence;
       }
-      if (!isSearchResponse(payload)) throw new Error("The search service returned unsupported evidence.");
       if (evidenceRequestId.current !== currentRequest) return;
-      setResult((current) =>
-        current
-          ? {
-              ...current,
-              selectedEvidence: payload.selectedEvidence,
-            }
-          : current,
-      );
+      setResult((current) => current ? { ...current, selectedEvidence } : current);
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") return;
       if (evidenceRequestId.current !== currentRequest) return;
-      setError(caught instanceof Error ? caught.message : "Evidence could not be loaded.");
+      setEvidenceError(caught instanceof Error ? caught.message : "Evidence could not be loaded.");
     } finally {
       if (evidenceRequestId.current === currentRequest) setEvidenceLoading(false);
     }
   }
 
   useEffect(() => {
-    const initialMode = searchModeFromUrl(
-      new URLSearchParams(window.location.search).get("searchMode"),
-    );
-    void search(INITIAL_QUERY, initialMode);
+    const initial = searchPageStateFromUrl(window.location.href, INITIAL_QUERY);
+    setInput(initial.query);
+    setSearchMode(initial.mode);
+    void search(initial.query, initial.mode, { requestedSelection: initial.selection });
     return () => {
       searchAbort.current?.abort();
       evidenceAbort.current?.abort();
     };
-    // The first query is intentional; subsequent searches are user-driven.
+    // Initial state comes from the shareable URL; subsequent searches are user-driven.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const strongestEvidenceItems = useMemo(
+  const queryFragment = activeQueryFragment(input);
+  const autocompleteSuggestions = useMemo(
+    () => searchMode === "embedding" && catalog && autocompleteOpen
+      ? suggestConcepts(catalog, queryFragment, 7)
+      : [],
+    [autocompleteOpen, catalog, queryFragment, searchMode],
+  );
+  useEffect(() => setActiveSuggestionIndex(0), [queryFragment, autocompleteOpen]);
+
+  const aliasResolutions = resolutions.filter((item) =>
+    item.matchedBy === "alias" || item.requestedNormalized !== item.concept.normalized
+  );
+  const evidenceItems = useMemo(
     () => selectedEvidenceItems(result, selection),
     [result, selection],
   );
-  const visibleItems = strongestEvidenceItems.slice(
-    0,
-    showAllExamples ? strongestEvidenceItems.length : INITIAL_VISIBLE_WORKS,
-  );
-  const hiddenExampleCount = Math.max(
-    0,
-    strongestEvidenceItems.length - INITIAL_VISIBLE_WORKS,
-  );
+  const visibleItems = evidenceItems.slice(0, showAllExamples ? evidenceItems.length : INITIAL_VISIBLE_WORKS);
+  const hiddenExampleCount = Math.max(0, evidenceItems.length - INITIAL_VISIBLE_WORKS);
   const selectedQuery = result?.queries.find((query) => query.id === selection?.queryId) ?? null;
   const selectedBin = result?.bins.find((bin) => bin.key === selection?.binKey) ?? null;
   const selectedSeries = result?.series.find((series) => series.queryId === selection?.queryId) ?? null;
-  const selectedPoint =
-    selectedSeries && selection ? pointForBin(selectedSeries, selection.binKey) : null;
+  const selectedPoint = selectedSeries && selection ? pointForBin(selectedSeries, selection.binKey) : null;
   const currentEvidence = result?.selectedEvidence ?? null;
-  const selectedEvidence =
-    currentEvidence &&
+  const selectedEvidence = currentEvidence &&
     currentEvidence.queryId === selection?.queryId &&
     currentEvidence.binKey === selection?.binKey
-      ? currentEvidence
-      : null;
+    ? currentEvidence
+    : null;
   const displayedBins = result?.bins.length ? timelineWindow(result.bins) : [];
   const hasChartPoints = result?.series.some((series) => series.points.length > 0) ?? false;
   const yearRange = displayedBins.length
     ? `${formatTimelineYear(displayedBins[0].start)}–${formatTimelineYear(displayedBins[displayedBins.length - 1].end)}`
     : "";
+  const errorPlacement = searchErrorPlacement(error, result !== null);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -274,17 +437,52 @@ export default function Home() {
 
   function changeSearchMode(nextMode: SearchMode) {
     if (nextMode === searchMode) return;
-    void search(submittedQuery, nextMode, { syncInput: false });
+    void search(input, nextMode, { syncInput: false });
+  }
+
+  function chooseSuggestion(suggestion: ConceptSuggestion) {
+    const next = replaceActiveQueryFragment(input, suggestion.concept.label);
+    setInput(next);
+    setAutocompleteOpen(false);
+    inputRef.current?.focus();
+  }
+
+  function handleSearchKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (!autocompleteOpen || !autocompleteSuggestions.length) {
+      if (event.key === "ArrowDown" && searchMode === "embedding") setAutocompleteOpen(true);
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveSuggestionIndex((current) => (current + 1) % autocompleteSuggestions.length);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveSuggestionIndex((current) =>
+        (current - 1 + autocompleteSuggestions.length) % autocompleteSuggestions.length
+      );
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      chooseSuggestion(autocompleteSuggestions[activeSuggestionIndex] ?? autocompleteSuggestions[0]);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      setAutocompleteOpen(false);
+    }
+  }
+
+  function applyUnknownSuggestion(suggestion: ConceptSuggestion) {
+    if (!unknownPrompt) return;
+    const next = replaceUnknownQueryTerm(input, unknownPrompt.input, suggestion.concept.label);
+    setInput(next);
+    void search(next, searchMode);
   }
 
   function activateSeries(queryId: string) {
     if (!result || hiddenQueryIds.has(queryId)) return;
-    const candidate =
-      selection && result.series.find((series) => series.queryId === queryId)?.points.some(
-        (point) => point.binKey === selection.binKey,
-      )
-        ? { queryId, binKey: selection.binKey }
-        : peakSelection(result, queryId);
+    const candidate = selection && result.series.find((series) => series.queryId === queryId)?.points.some(
+      (point) => point.binKey === selection.binKey,
+    )
+      ? { queryId, binKey: selection.binKey }
+      : peakSelection(result, queryId);
     if (candidate) void loadEvidence(candidate);
     else setSelection(null);
   }
@@ -313,21 +511,66 @@ export default function Home() {
       <div className="workspace" id="top">
         <section className="search-area" aria-labelledby="page-title">
           <div className="intro">
-            <h1 id="page-title">Trace an idea through art history</h1>
-            <p>Compare up to five concepts using catalogue keywords or image embeddings. Separate lines with commas; quote a literal comma.</p>
+            <h1 id="page-title">Trace a visual idea through art history</h1>
+            <p>Compare up to five precomputed visual concepts across The Met’s public-domain image collection, or switch to catalogue metadata keywords.</p>
           </div>
 
           <div className="search-controls">
             <form className="search-form" onSubmit={submit}>
-              <label className="sr-only" htmlFor="concept-search">Compare visual concepts</label>
-              <input
-                id="concept-search"
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                placeholder="industry, machine, skyscraper"
-                maxLength={MAX_QUERY_LENGTH}
-                aria-describedby="query-help"
-              />
+              <label className="sr-only" htmlFor="concept-search">
+                {searchMode === "embedding" ? "Compare visual concepts" : "Search metadata keywords"}
+              </label>
+              <div className="search-input-wrap">
+                <input
+                  ref={inputRef}
+                  id="concept-search"
+                  value={input}
+                  onChange={(event) => {
+                    setInput(event.target.value);
+                    setAutocompleteOpen(searchMode === "embedding");
+                  }}
+                  onFocus={() => {
+                    if (searchMode !== "embedding") return;
+                    setAutocompleteOpen(true);
+                    void ensureCatalog().catch(() => undefined);
+                  }}
+                  onBlur={() => setAutocompleteOpen(false)}
+                  onKeyDown={handleSearchKeyDown}
+                  placeholder={searchMode === "embedding" ? "Horse, Ship" : "industry, machine, skyscraper"}
+                  maxLength={MAX_QUERY_LENGTH}
+                  aria-describedby="query-help"
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-controls="concept-suggestions"
+                  aria-expanded={autocompleteOpen && autocompleteSuggestions.length > 0}
+                  aria-activedescendant={autocompleteOpen && autocompleteSuggestions.length
+                    ? `concept-suggestion-${activeSuggestionIndex}`
+                    : undefined}
+                />
+                {autocompleteOpen && autocompleteSuggestions.length > 0 && (
+                  <ul className="autocomplete-list" id="concept-suggestions" role="listbox">
+                    {autocompleteSuggestions.map((suggestion, index) => (
+                      <li
+                        className="autocomplete-option"
+                        id={`concept-suggestion-${index}`}
+                        key={suggestion.concept.id}
+                        role="option"
+                        aria-selected={index === activeSuggestionIndex}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onMouseEnter={() => setActiveSuggestionIndex(index)}
+                        onClick={() => chooseSuggestion(suggestion)}
+                      >
+                        <strong>{suggestion.concept.label}</strong>
+                        <span>
+                          {suggestion.matchedBy === "alias"
+                            ? `${suggestion.matchedText} → ${suggestion.concept.label}`
+                            : suggestion.concept.category ?? "Visual concept"}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
               <button type="submit" disabled={loading}>{loading ? "Searching…" : "Search"}</button>
             </form>
 
@@ -339,11 +582,9 @@ export default function Home() {
                     key={mode}
                     type="button"
                     aria-pressed={searchMode === mode}
-                    title={
-                      mode === "keyword"
-                        ? "Match words in catalogue metadata"
-                        : "Match visual concepts using image embeddings"
-                    }
+                    title={mode === "keyword"
+                      ? "Match words in catalogue metadata"
+                      : "Use precomputed image-embedding timelines for curated concepts"}
                     onClick={() => changeSearchMode(mode)}
                   >
                     {SEARCH_MODE_LABELS[mode]}
@@ -353,11 +594,23 @@ export default function Home() {
             </div>
 
             <div className="query-row" id="query-help">
-              <span>Try:</span>
+              <span>{searchMode === "embedding" ? "Curated concepts:" : "Try:"}</span>
               {EXAMPLE_QUERIES.map((example) => (
-                <button key={example} type="button" onClick={() => void search(example)}>{example}</button>
+                <button key={example} type="button" onClick={() => void search(example, searchMode)}>{example}</button>
               ))}
             </div>
+
+            {submittedSearchMode === "embedding" && aliasResolutions.length > 0 && (
+              <div className="resolution-row" aria-label="Resolved visual concept aliases">
+                <strong>Resolved:</strong>
+                {aliasResolutions.map((item) => (
+                  <span className="resolution-pill" key={`${item.requestedNormalized}:${item.concept.id}`}>
+                    {item.requested} → <strong>{item.concept.label}</strong>
+                  </span>
+                ))}
+              </div>
+            )}
+            {errorPlacement === "inline" && <div className="search-error" role="alert">{error}</div>}
           </div>
         </section>
 
@@ -367,12 +620,24 @@ export default function Home() {
               <h2>{loading ? "Searching the collection…" : result?.metric.label ?? "Results over time"}</h2>
               {!loading && yearRange && <span>{yearRange}</span>}
             </div>
-            {result && !loading && (
-              <p>{result.queries.length} series · {result.corpus.label}</p>
-            )}
+            {result && !loading && <p>{result.queries.length} series · {result.corpus.label}</p>}
           </div>
 
-          {error && !result && <div className="message-state">{error} Try another search.</div>}
+          {errorPlacement === "empty" && (
+            <div className="message-state" role="alert">
+              <span>{error}</span>
+              {unknownPrompt && unknownPrompt.suggestions.length > 0 && (
+                <span className="unknown-suggestions">
+                  <span>Did you mean</span>
+                  {unknownPrompt.suggestions.map((suggestion) => (
+                    <button key={suggestion.concept.id} type="button" onClick={() => applyUnknownSuggestion(suggestion)}>
+                      {suggestion.concept.label}
+                    </button>
+                  ))}
+                </span>
+              )}
+            </div>
+          )}
           {loading && <div className="chart-skeleton" />}
           {!loading && result && result.bins.length > 0 && hasChartPoints && (
             <Timeline
@@ -394,7 +659,7 @@ export default function Home() {
             <div className="message-state">
               {submittedSearchMode === "embedding"
                 ? "No dated visual matches passed the score cutoff. Empty periods mean insufficient evidence, not zero historical prevalence."
-                : "No dated artworks matched these keywords."}
+                : "No dated artworks matched these metadata keywords."}
             </div>
           )}
         </section>
@@ -411,18 +676,22 @@ export default function Home() {
             )}
             {selectedPoint && submittedSearchMode === "embedding" && (
               <p>
-                {selectedEvidence?.contributorCount ?? 0} visual match
-                {(selectedEvidence?.contributorCount ?? 0) === 1 ? "" : "es"}
+                {evidenceLoading
+                  ? "Loading visual matches…"
+                  : evidenceError
+                    ? "Evidence unavailable"
+                    : `${selectedEvidence?.contributorCount ?? 0} visual match${(selectedEvidence?.contributorCount ?? 0) === 1 ? "" : "es"}`}
               </p>
             )}
           </div>
 
+          {evidenceError && <p className="evidence-error" role="alert">{evidenceError}</p>}
           <div className="artwork-grid" aria-busy={evidenceLoading}>
             {evidenceLoading && <p className="no-works">Loading evidence…</p>}
             {!evidenceLoading && visibleItems.map((artwork) => (
               <ArtworkCard key={artwork.artworkId} artwork={artwork} />
             ))}
-            {!evidenceLoading && selection && strongestEvidenceItems.length === 0 && !loading && (
+            {!evidenceLoading && !evidenceError && selection && evidenceItems.length === 0 && !loading && (
               <p className="no-works">
                 {submittedSearchMode === "embedding"
                   ? "No visual matches passed the score cutoff in this period."

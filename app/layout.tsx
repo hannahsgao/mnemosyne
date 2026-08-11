@@ -1,11 +1,53 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import "./globals.css";
 
-export const metadata: Metadata = {
-  title: "Mnemosyne — search visual culture across time",
-  description:
-    "Explore how visual ideas appear across art history and inspect the artworks behind every signal.",
-};
+const TITLE = "Mnemosyne — Trace visual ideas through art history";
+const DESCRIPTION =
+  "Explore precomputed visual concepts across The Met’s public-domain collection and inspect the artworks behind every signal.";
+const FALLBACK_ORIGIN = "https://mnemosyne.hannahgao.studio";
+
+function requestOrigin(requestHeaders: Pick<Headers, "get">) {
+  const forwardedHost = requestHeaders.get("x-forwarded-host")?.split(",")[0]?.trim();
+  const host = forwardedHost || requestHeaders.get("host")?.trim();
+  if (!host || !/^(?:[a-z0-9-]+\.)*[a-z0-9-]+(?::\d+)?$/i.test(host)) {
+    return new URL(FALLBACK_ORIGIN);
+  }
+  const forwardedProtocol = requestHeaders.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const local = host.startsWith("localhost") || host.startsWith("127.0.0.1");
+  const protocol = forwardedProtocol === "http" || forwardedProtocol === "https"
+    ? forwardedProtocol
+    : local ? "http" : "https";
+  return new URL(`${protocol}://${host}`);
+}
+
+export async function generateMetadata(): Promise<Metadata> {
+  const origin = requestOrigin(await headers());
+  const socialImage = new URL("/og.png", origin).toString();
+  return {
+    title: TITLE,
+    description: DESCRIPTION,
+    openGraph: {
+      type: "website",
+      title: TITLE,
+      description: DESCRIPTION,
+      siteName: "Mnemosyne",
+      url: origin,
+      images: [{
+        url: socialImage,
+        width: 1731,
+        height: 909,
+        alt: "Mnemosyne visual-concept timeline with archival art imagery",
+      }],
+    },
+    twitter: {
+      card: "summary_large_image",
+      title: TITLE,
+      description: DESCRIPTION,
+      images: [socialImage],
+    },
+  };
+}
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
