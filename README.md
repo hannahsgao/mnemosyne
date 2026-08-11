@@ -230,11 +230,15 @@ npm run build:sites
 ```
 
 Static releases under `public/data/v1/releases/` receive long-lived immutable
-cache headers; only `public/data/v1/manifest.json` revalidates. The intended
-custom hostname is `mnemosyne.hannahgao.studio`. It is a separate subdomain:
-the portfolio Worker and DNS route for `hannahgao.studio` must not be changed.
-Do not deploy the generated `dist/server/wrangler.json` directly; Sites owns the
-real D1 resource wiring.
+cache headers; only `public/data/v1/manifest.json` revalidates. On Sites, the
+browser reads those files through `/catalog-data/v1/`, a narrow Worker asset
+binding route that preserves ETags and applies the immutable browser policy.
+The local Next development server rewrites that prefix to the same files under
+`public/data/v1/`. The intended custom hostname is
+`mnemosyne.hannahgao.studio`. It is a separate subdomain: the portfolio Worker
+and DNS route for `hannahgao.studio` must not be changed. Do not deploy the
+generated `dist/server/wrangler.json` directly; Sites owns the real D1 resource
+wiring.
 
 ## Data attribution
 

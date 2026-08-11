@@ -4,7 +4,7 @@ import {
   handleImageOptimization,
 } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
-import { serveImmutableReleaseAsset } from "../lib/static-release";
+import { serveCatalogAsset } from "../lib/static-release";
 import { handleMetServiceRequest, type D1Database } from "./met-search";
 
 interface Env {
@@ -28,7 +28,7 @@ interface ExecutionContext {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    const releaseAsset = await serveImmutableReleaseAsset(
+    const releaseAsset = await serveCatalogAsset(
       request,
       env.ASSETS.fetch.bind(env.ASSETS),
     );

@@ -287,7 +287,7 @@ export async function loadConceptCatalog(options: {
   baseUrl?: string;
   fetch?: typeof fetch;
 } = {}): Promise<ConceptCatalog> {
-  const baseUrl = (options.baseUrl ?? "/data/v1").replace(/\/$/, "");
+  const baseUrl = (options.baseUrl ?? "/catalog-data/v1").replace(/\/$/, "");
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
   const cacheKey = baseUrl;
   if (catalogPromises.has(cacheKey)) return catalogPromises.get(cacheKey)!;

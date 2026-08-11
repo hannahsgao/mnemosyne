@@ -10,7 +10,6 @@ const localBindingConfig = {
   compatibility_flags: ["nodejs_compat"],
   assets: {
     binding: "ASSETS",
-    run_worker_first: ["/data/v1/releases/*"],
   },
   d1_databases: d1
     ? [{ binding: d1, database_name: "mnemosyne-d1", database_id: "00000000-0000-4000-8000-000000000000" }]

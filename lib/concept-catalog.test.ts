@@ -13,8 +13,8 @@ import {
 } from "./concept-catalog.ts";
 
 const responses: Record<string, unknown> = {
-  "/data/v1/manifest.json": { release: "releases/r1", complete: true, fullCatalog: true },
-  "/data/v1/releases/r1/manifest.json": {
+  "/catalog-data/v1/manifest.json": { release: "releases/r1", complete: true, fullCatalog: true },
+  "/catalog-data/v1/releases/r1/manifest.json": {
     releaseFingerprint: "fingerprint",
     catalogVersion: "v1",
     complete: true,
@@ -23,7 +23,7 @@ const responses: Record<string, unknown> = {
     metric: { id: "score-qualified-visual-concentration-lift", version: "m1", qualifiedFraction: 0.001 },
     files: { bins: "bins.json", concepts: "concepts.json", seriesTemplate: "series/{conceptId}.json", evidenceTemplate: "evidence/{conceptId}.json" },
   },
-  "/data/v1/releases/r1/concepts.json": {
+  "/catalog-data/v1/releases/r1/concepts.json": {
     concepts: [
       { id: "horse", label: "Horse", normalized: "horse", aliases: ["stallion", "mare"], category: "Animals" },
       { id: "ship", label: "Ship", normalized: "ship", aliases: ["vessel"], category: "Objects" },
@@ -31,22 +31,22 @@ const responses: Record<string, unknown> = {
       { id: "battle", label: "Battle", normalized: "battle", aliases: ["war"], category: "Themes" },
     ],
   },
-  "/data/v1/releases/r1/bins.json": {
+  "/catalog-data/v1/releases/r1/bins.json": {
     keys: ["1900", "1910"], labels: ["1900s", "1910s"], starts: [1900, 1910], ends: [1909, 1919],
     denominators: [100, 2], objectCounts: [90, 2], clusterCounts: [80, 2], unreliableIndices: [1],
   },
-  "/data/v1/releases/r1/series/horse.json": {
+  "/catalog-data/v1/releases/r1/series/horse.json": {
     conceptId: "horse", k: 4, threshold: 0.2, candidateK: 10, candidateThreshold: 0.1, lowSignal: false,
     diagnostics: { standardizedSeparation: 3, controlMean: 0, controlStdDev: 1, promptTopKJaccard: 0.8, reasons: [] },
     pointIndices: [0], values: [2.5], shares: [0.025], hitMasses: [2.5], objectCounts: [4], clusterCounts: [3],
     suppressedBinIndices: [1], defaultEvidenceBinIndex: 0,
   },
-  "/data/v1/releases/r1/series/ship.json": {
+  "/catalog-data/v1/releases/r1/series/ship.json": {
     conceptId: "ship", k: 2, threshold: 0.2, lowSignal: false,
     diagnostics: { standardizedSeparation: 2, controlMean: 0, controlStdDev: 1, promptTopKJaccard: 0.7, reasons: [] },
     pointIndices: [0], values: [1.5], shares: [0.015], hitMasses: [1.5], objectCounts: [2], clusterCounts: [2], defaultEvidenceBinIndex: 0,
   },
-  "/data/v1/releases/r1/evidence/horse.json": {
+  "/catalog-data/v1/releases/r1/evidence/horse.json": {
     conceptId: "horse", percentile: 0.001, threshold: 0.2,
     artworks: {
       a1: {
@@ -89,7 +89,7 @@ test("resolves labels and aliases exactly while exposing the canonical concept",
 });
 
 test("expands compact bins and selected series without fetching unselected series", async () => {
-  assert.deepEqual(expandCompactBins(responses["/data/v1/releases/r1/bins.json"]).map((bin) => ({ key: bin.key, unreliable: bin.belowMinimumDenominator })), [
+  assert.deepEqual(expandCompactBins(responses["/catalog-data/v1/releases/r1/bins.json"]).map((bin) => ({ key: bin.key, unreliable: bin.belowMinimumDenominator })), [
     { key: "1900", unreliable: false },
     { key: "1910", unreliable: true },
   ]);
