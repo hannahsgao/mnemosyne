@@ -34,9 +34,8 @@ import {
   searchErrorPlacement,
 } from "../lib/explorer-state";
 import { MAX_QUERY_LENGTH, normalizeQueryTerm, parseConceptQuery, QuerySyntaxError } from "../lib/query";
+import { requestKeywordEvidence, requestKeywordSearch } from "../lib/keyword-transport";
 import {
-  buildEvidenceUrl,
-  buildSearchUrl,
   DEFAULT_SEARCH_MODE,
   pageUrlForSearchState,
   SEARCH_MODE_LABELS,
@@ -275,10 +274,9 @@ export default function Home() {
         });
         payload = await loadConceptSearch(loadedCatalog, nextResolutions);
       } else {
-        const response = await fetch(buildSearchUrl(trimmedQuery, nextMode), {
+        const { response, payload: body } = await requestKeywordSearch(trimmedQuery, {
           signal: controller.signal,
         });
-        const body: unknown = await response.json();
         if (!response.ok) throw new Error(errorMessage(body, "Search failed."));
         if (!isSearchResponse(body)) throw new Error("The search service returned an unsupported response.");
         payload = body;
@@ -360,11 +358,11 @@ export default function Home() {
           nextSelection.binKey,
         );
       } else {
-        const response = await fetch(
-          buildEvidenceUrl(activeQuery, activeMode, nextSelection),
+        const { response, payload } = await requestKeywordEvidence(
+          activeQuery,
+          nextSelection,
           { signal: controller.signal },
         );
-        const payload: unknown = await response.json();
         if (!response.ok) throw new Error(errorMessage(payload, "Evidence could not be loaded."));
         if (!isEvidenceEnvelope(payload)) {
           throw new Error("The evidence service returned unsupported evidence.");
