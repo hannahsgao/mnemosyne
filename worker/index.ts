@@ -68,8 +68,18 @@ const worker = {
     }
     const response = await handler.fetch(request, env, ctx);
     if (visualCacheKey && shouldStoreVisualEdgeResponse(response)) {
-      ctx.waitUntil(caches.default.put(visualCacheKey, response.clone()).catch(() => undefined));
-      return withVisualEdgeCacheStatus(response, "MISS");
+      try {
+        // Await the local edge write so MISS means the response is available to
+        // the next request in this data center. A cache failure still fails open.
+        await caches.default.put(visualCacheKey, response.clone());
+        return withVisualEdgeCacheStatus(response, "MISS");
+      } catch (error) {
+        console.warn(
+          "visual_edge_cache_write_failed",
+          error instanceof Error ? error.message : "unknown cache error",
+        );
+        return withVisualEdgeCacheStatus(response, "BYPASS");
+      }
     }
     return response;
   },

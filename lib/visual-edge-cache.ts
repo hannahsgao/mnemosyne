@@ -36,7 +36,7 @@ export function shouldStoreVisualEdgeResponse(
 
 export function withVisualEdgeCacheStatus(
   response: Response,
-  status: "HIT" | "MISS",
+  status: "BYPASS" | "HIT" | "MISS",
 ): Response {
   const headers = new Headers(response.headers);
   headers.set(VISUAL_EDGE_CACHE_HEADER, status);
