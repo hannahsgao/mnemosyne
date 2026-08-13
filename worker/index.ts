@@ -5,7 +5,14 @@ import {
 } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { serveCatalogAsset } from "../lib/static-release";
+import {
+  shouldStoreVisualEdgeResponse,
+  visualEdgeCacheKey,
+  withVisualEdgeCacheStatus,
+} from "../lib/visual-edge-cache";
 import { handleMetServiceRequest, type D1Database } from "./met-search";
+
+declare const caches: CacheStorage & { default: Cache };
 
 interface Env {
   ASSETS: { fetch(request: Request): Promise<Response> };
@@ -28,6 +35,15 @@ interface ExecutionContext {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    const visualCacheKey = visualEdgeCacheKey(request);
+    if (visualCacheKey) {
+      try {
+        const cached = await caches.default.match(visualCacheKey);
+        if (cached) return withVisualEdgeCacheStatus(cached, "HIT");
+      } catch {
+        // Cache availability must never make search unavailable.
+      }
+    }
     const releaseAsset = await serveCatalogAsset(
       request,
       env.ASSETS.fetch.bind(env.ASSETS),
@@ -50,7 +66,12 @@ const worker = {
         [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES],
       );
     }
-    return handler.fetch(request, env, ctx);
+    const response = await handler.fetch(request, env, ctx);
+    if (visualCacheKey && shouldStoreVisualEdgeResponse(response)) {
+      ctx.waitUntil(caches.default.put(visualCacheKey, response.clone()).catch(() => undefined));
+      return withVisualEdgeCacheStatus(response, "MISS");
+    }
+    return response;
   },
 };
 
