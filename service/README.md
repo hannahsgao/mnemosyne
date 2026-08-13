@@ -258,6 +258,28 @@ model versions, prompt version, view, filters, metric version, candidate and
 qualification fractions, evidence score/cluster settings, and counting unit.
 Selection changes do not invalidate them.
 
+The embedding service retains 64 series by default. A measured 1,703-bin
+production entry is roughly 0.72 MiB of Python-owned data, so increasing this to
+512 could add roughly 368 MiB before allocator overhead. Set
+`MNEMOSYNE_CACHE_MAX_ENTRIES` or `--cache-max-entries` explicitly after measuring
+the deployed process; the launch profile keeps 64.
+
+Cold series batches are guarded by one process-wide lock. Already-cached calls
+bypass it, and a cache recheck inside the lock deduplicates identical or
+overlapping cold calls. Distinct cold matrix scans are intentionally serialized
+on the two-CPU launch host. `MNEMOSYNE_MAX_CONCURRENT_SEARCHES` controls HTTP
+admission only; it is overload rejection, not per-IP rate limiting or a promise
+of parallel compute.
+
+For the private Hugging Face profile, authentication is enforced by private
+Space ingress and the web proxy supplies an HF read token. The container starts
+with `MNEMOSYNE_HTTP_AUTH_MODE=disabled` so it does not demand an incompatible
+second bearer value in the same `Authorization` header. Other self-hosted
+deployments can set `MNEMOSYNE_HTTP_AUTH_MODE=required` together with
+`MNEMOSYNE_SERVICE_TOKEN`. See
+[`../deploy/huggingface/README.md`](../deploy/huggingface/README.md) for the
+isolated Space and private-bucket procedure.
+
 ## Verify
 
 ```bash

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 from pathlib import Path
 import sys
 
 from .artifacts import ArtifactBundle
+from .cache import InMemorySeriesCache
 from .encoders import FixtureTextEncoder, Siglip2TextEncoder
-from .http import serve
+from .http import AUTH_MODES, HttpConfig, serve
 from .met_artifacts import MetKeywordArtifacts
 from .met_client import HttpMetClient, SEARCH_MODES, SqliteMetClient
 from .met_service import MetKeywordConfig, MetKeywordSearchService
@@ -21,6 +24,51 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--http-auth-mode",
+        choices=sorted(AUTH_MODES),
+        default=os.environ.get("MNEMOSYNE_HTTP_AUTH_MODE", "disabled"),
+        help=(
+            "bearer authentication policy; containers should use required "
+            "(env: MNEMOSYNE_HTTP_AUTH_MODE)"
+        ),
+    )
+    parser.add_argument(
+        "--max-concurrent-searches",
+        type=int,
+        default=int(os.environ.get("MNEMOSYNE_MAX_CONCURRENT_SEARCHES", "2")),
+        help=(
+            "maximum admitted search/evidence HTTP requests; embedding compute "
+            "remains separately serialized (default: 2)"
+        ),
+    )
+    parser.add_argument(
+        "--retry-after-seconds",
+        type=int,
+        default=int(os.environ.get("MNEMOSYNE_RETRY_AFTER_SECONDS", "1")),
+        help="Retry-After response value when capacity is busy (default: 1)",
+    )
+    parser.add_argument(
+        "--request-io-timeout-seconds",
+        type=float,
+        default=float(os.environ.get("MNEMOSYNE_REQUEST_IO_TIMEOUT_SECONDS", "15")),
+        help="socket timeout while reading a request or writing a response (default: 15)",
+    )
+    parser.add_argument(
+        "--cache-max-entries",
+        type=int,
+        default=int(os.environ.get("MNEMOSYNE_CACHE_MAX_ENTRIES", "64")),
+        help=(
+            "maximum embedding series retained in the in-process LRU cache "
+            "(env: MNEMOSYNE_CACHE_MAX_ENTRIES; default: 64)"
+        ),
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default=os.environ.get("MNEMOSYNE_LOG_LEVEL", "INFO").upper(),
+        help="process log level (default: INFO)",
+    )
     index = parser.add_mutually_exclusive_group()
     index.add_argument("--no-faiss", action="store_true")
     index.add_argument(
@@ -104,6 +152,21 @@ def _prefer_faiss(args: argparse.Namespace, platform: str = sys.platform) -> boo
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    bearer_token = os.environ.get("MNEMOSYNE_SERVICE_TOKEN")
+    try:
+        http_config = HttpConfig(
+            auth_mode=args.http_auth_mode,
+            bearer_token=bearer_token,
+            max_concurrent_searches=args.max_concurrent_searches,
+            retry_after_seconds=args.retry_after_seconds,
+            request_io_timeout_seconds=args.request_io_timeout_seconds,
+        )
+    except ValueError as error:
+        raise SystemExit(f"invalid HTTP configuration: {error}") from error
     if args.met_keyword:
         met_artifacts = MetKeywordArtifacts.load(args.artifacts)
         search_client = SqliteMetClient(met_artifacts.keyword_index_path)
@@ -139,10 +202,11 @@ def main(argv: list[str] | None = None) -> int:
                 minimum_evidence_clusters=args.minimum_evidence_clusters,
                 minimum_bin_evidence_clusters=args.minimum_bin_evidence_clusters,
             ),
+            cache=InMemorySeriesCache(max_entries=args.cache_max_entries),
             prefer_faiss=_prefer_faiss(args),
         )
     try:
-        serve(service, args.host, args.port)
+        serve(service, args.host, args.port, config=http_config)
     except KeyboardInterrupt:
         return 130
     finally:

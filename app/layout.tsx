@@ -4,7 +4,7 @@ import "./globals.css";
 
 const TITLE = "Mnemosyne — Trace visual ideas through art history";
 const DESCRIPTION =
-  "Explore precomputed visual concepts across The Met’s public-domain collection and inspect the artworks behind every signal.";
+  "Search The Met’s public-domain collection by metadata or any visual idea, then trace results through time and inspect the artworks behind every signal.";
 const FALLBACK_ORIGIN = "https://mnemosyne.hannahgao.studio";
 
 function requestOrigin(requestHeaders: Pick<Headers, "get">) {
@@ -37,7 +37,7 @@ export async function generateMetadata(): Promise<Metadata> {
         url: socialImage,
         width: 1731,
         height: 909,
-        alt: "Mnemosyne visual-concept timeline with archival art imagery",
+        alt: "Mnemosyne visual-search timeline with archival art imagery",
       }],
     },
     twitter: {

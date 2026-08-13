@@ -20,6 +20,14 @@ class CommandLineTests(unittest.TestCase):
         self.assertTrue(_prefer_faiss(forced, platform="darwin"))
         self.assertTrue(_prefer_faiss(forced, platform="linux"))
 
+    def test_embedding_cache_capacity_is_explicit_and_bounded(self) -> None:
+        base = ["--artifacts", str(FIXTURES), "--siglip2"]
+        self.assertEqual(build_parser().parse_args(base).cache_max_entries, 64)
+        self.assertEqual(
+            build_parser().parse_args([*base, "--cache-max-entries", "3"]).cache_max_entries,
+            3,
+        )
+
     def test_keyboard_interrupt_stops_without_a_traceback(self) -> None:
         with patch("mnemosyne_search.cli.serve", side_effect=KeyboardInterrupt):
             status = main(

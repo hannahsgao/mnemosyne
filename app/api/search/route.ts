@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseConceptQuery, QuerySyntaxError } from "../../../lib/query";
 import {
+  isTimeoutError,
+  NO_STORE_CACHE_CONTROL,
+  outerCacheControl,
+  safeRetryAfter,
+  upstreamHeaders,
+  upstreamTimeoutMs,
+  visualProxyError,
+} from "../../../lib/embedding-proxy";
+import {
   buildBackendImageUrl,
   configuredSearchServiceUrl,
   DEFAULT_SEARCH_MODE,
@@ -48,7 +57,22 @@ const FIELDS = [
   "image_id",
   "is_public_domain",
 ].join(",");
-const UPSTREAM_TIMEOUT_MS = 15_000;
+const AIC_UPSTREAM_TIMEOUT_MS = 15_000;
+
+function noStoreJson(body: unknown, status: number) {
+  return NextResponse.json(body, {
+    status,
+    headers: { "Cache-Control": NO_STORE_CACHE_CONTROL },
+  });
+}
+
+function visualErrorResponse(status: number, retryAfter: string | null = null, timedOut = false) {
+  const failure = visualProxyError(status, timedOut);
+  const headers: Record<string, string> = { "Cache-Control": NO_STORE_CACHE_CONTROL };
+  const safeRetry = safeRetryAfter(retryAfter);
+  if (safeRetry) headers["Retry-After"] = safeRetry;
+  return NextResponse.json(failure.body, { status: failure.status, headers });
+}
 
 function rewriteBackendImageUrls(payload: unknown, searchMode: SearchMode) {
   if (!payload || typeof payload !== "object") return payload;
@@ -110,46 +134,60 @@ async function proxySearchService(
   } catch {
     return NextResponse.json(
       { error: `${serviceEnvironmentName} is not a valid URL.` },
-      { status: 500 },
+      { status: 500, headers: { "Cache-Control": NO_STORE_CACHE_CONTROL } },
     );
   }
 
   try {
     const response = await fetch(target, {
       method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Mnemosyne web app",
-      },
+      headers: upstreamHeaders(searchMode, process.env),
       body: JSON.stringify({
         query,
         selectedQueryId: request.nextUrl.searchParams.get("evidenceQueryId"),
         selectedBinKey: request.nextUrl.searchParams.get("evidenceBinKey"),
       }),
       cache: "no-store",
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      signal: AbortSignal.timeout(upstreamTimeoutMs(searchMode, process.env)),
     });
     const contentType = response.headers.get("content-type") ?? "";
     if (contentType.includes("application/json")) {
       const body: unknown = await response.json();
+      if (searchMode === "embedding" && !response.ok) {
+        return visualErrorResponse(
+          response.status,
+          response.headers.get("retry-after"),
+        );
+      }
+      if (
+        searchMode === "embedding" &&
+        (!body || typeof body !== "object" ||
+          (body as { schemaVersion?: unknown }).schemaVersion !== "mnemosyne.search.v1")
+      ) {
+        return visualErrorResponse(502);
+      }
       return NextResponse.json(rewriteBackendImageUrls(body, searchMode), {
         status: response.status,
-        headers: { "Cache-Control": response.headers.get("cache-control") ?? "no-store" },
+        headers: {
+          "Cache-Control": outerCacheControl(
+            searchMode,
+            response.status,
+            response.headers.get("cache-control"),
+          ),
+        },
       });
     }
+    if (searchMode === "embedding") return visualErrorResponse(response.status || 502);
     return new NextResponse(await response.text(), {
       status: response.status,
-      headers: { "Cache-Control": "no-store", "Content-Type": contentType || "text/plain" },
+      headers: {
+        "Cache-Control": NO_STORE_CACHE_CONTROL,
+        "Content-Type": contentType || "text/plain",
+      },
     });
   } catch (error) {
-    return NextResponse.json(
-      {
-        error: "The local search service could not be reached.",
-        detail: error instanceof Error ? error.message : "Unknown error",
-      },
-      { status: 502 },
-    );
+    if (searchMode === "embedding") return visualErrorResponse(502, null, isTimeoutError(error));
+    return noStoreJson({ error: "The metadata search service could not be reached." }, 502);
   }
 }
 
@@ -162,7 +200,7 @@ async function searchAic(query: QueryDescriptor): Promise<PrototypeQueryResult> 
   const response = await fetch(url, {
     headers: { "User-Agent": "Mnemosyne prototype (research interface)" },
     next: { revalidate: 60 * 60 * 12 },
-    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    signal: AbortSignal.timeout(AIC_UPSTREAM_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`Museum API returned ${response.status}`);
 
@@ -297,7 +335,7 @@ export async function GET(request: NextRequest) {
   if (requestedSearchMode !== null && !isSearchMode(requestedSearchMode)) {
     return NextResponse.json(
       { error: "searchMode must be keyword or embedding." },
-      { status: 400 },
+      { status: 400, headers: { "Cache-Control": NO_STORE_CACHE_CONTROL } },
     );
   }
   const searchMode = requestedSearchMode ?? DEFAULT_SEARCH_MODE;
@@ -306,7 +344,7 @@ export async function GET(request: NextRequest) {
     parsed = parseConceptQuery(input);
   } catch (error) {
     if (error instanceof QuerySyntaxError) {
-      return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
+      return noStoreJson({ error: error.message, code: error.code }, 400);
     }
     throw error;
   }
@@ -318,9 +356,9 @@ export async function GET(request: NextRequest) {
     if (!serviceUrl) {
       return NextResponse.json(
         {
-          error: `${searchMode === "embedding" ? "Embedding" : "Keyword"} search is not configured. Set ${environmentName}.`,
+          error: `${SEARCH_MODE_NAME[searchMode]} search is not configured. Set ${environmentName}.`,
         },
-        { status: 503 },
+        { status: 503, headers: { "Cache-Control": NO_STORE_CACHE_CONTROL } },
       );
     }
     return proxySearchService(request, serviceUrl, environmentName, input, searchMode);
@@ -331,16 +369,16 @@ export async function GET(request: NextRequest) {
         error:
           "Search mode is not configured. Set MNEMOSYNE_SEARCH_MODE to artifact or catalogue-demo.",
       },
-      { status: 503 },
+      { status: 503, headers: { "Cache-Control": NO_STORE_CACHE_CONTROL } },
     );
   }
-  if (searchMode === "embedding") {
+  if (searchMode !== "keyword") {
     return NextResponse.json(
       {
         error:
-          "Embedding search is unavailable in catalogue-demo mode. Configure both artifact search services to use the toggle.",
+          `${SEARCH_MODE_NAME[searchMode]} search is unavailable in catalogue-demo mode. Configure the corresponding artifact service.`,
       },
-      { status: 503 },
+      { status: 503, headers: { "Cache-Control": NO_STORE_CACHE_CONTROL } },
     );
   }
 
@@ -370,3 +408,8 @@ export async function GET(request: NextRequest) {
     );
   }
 }
+
+const SEARCH_MODE_NAME: Record<SearchMode, string> = {
+  embedding: "Visual",
+  keyword: "Metadata",
+};

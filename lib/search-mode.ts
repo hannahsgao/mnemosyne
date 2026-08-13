@@ -1,14 +1,14 @@
 import type { ChartSelection } from "./types";
 
-export const SEARCH_MODES = ["embedding", "keyword"] as const;
+export const SEARCH_MODES = ["keyword", "embedding"] as const;
 
 export type SearchMode = (typeof SEARCH_MODES)[number];
 
 export const DEFAULT_SEARCH_MODE: SearchMode = "embedding";
 
 export const SEARCH_MODE_LABELS: Record<SearchMode, string> = {
-  keyword: "Metadata keywords",
-  embedding: "Visual concepts",
+  keyword: "Metadata",
+  embedding: "Visual",
 };
 
 export type SearchPageState = {

@@ -11,16 +11,21 @@ import {
   pageUrlForSearchMode,
   searchPageStateFromUrl,
   searchModeFromUrl,
+  SEARCH_MODE_LABELS,
+  SEARCH_MODES,
   searchServiceEnvironmentName,
 } from "./search-mode.ts";
 
-test("uses visual concepts as the URL default and accepts the two supported modes", () => {
+test("keeps exactly the keyword and embedding mode values", () => {
+  assert.deepEqual(SEARCH_MODES, ["keyword", "embedding"]);
   assert.equal(DEFAULT_SEARCH_MODE, "embedding");
   assert.equal(searchModeFromUrl(null), "embedding");
   assert.equal(searchModeFromUrl("unknown"), "embedding");
   assert.equal(searchModeFromUrl("keyword"), "keyword");
   assert.equal(searchModeFromUrl("embedding"), "embedding");
+  assert.equal(searchModeFromUrl("siglip"), "embedding");
   assert.equal(isSearchMode("semantic"), false);
+  assert.deepEqual(SEARCH_MODE_LABELS, { keyword: "Metadata", embedding: "Visual" });
 });
 
 test("builds mode-specific search and evidence requests", () => {

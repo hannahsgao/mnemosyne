@@ -1,0 +1,6 @@
+# Top-level production inference dependencies are pinned to the versions used
+# by the local exact-SigLIP runtime. The CPU-only torch wheel is installed from
+# PyTorch's index in Dockerfile before this file is resolved.
+certifi==2025.11.12
+numpy==2.4.2
+transformers==4.57.1

@@ -26,6 +26,8 @@ class InMemorySeriesCache(Generic[T]):
     max_entries: int = 64
 
     def __post_init__(self) -> None:
+        if self.max_entries < 1:
+            raise ValueError("max_entries must be positive")
         self._values: OrderedDict[str, T] = OrderedDict()
         self._lock = RLock()
 
