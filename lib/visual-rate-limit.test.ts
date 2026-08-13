@@ -14,6 +14,9 @@ test("targets only same-origin Visual search and evidence GET requests", () => {
     "https://example.test/api/evidence?q=horse&searchMode=embedding",
   )), true);
   assert.equal(isVisualApiRequest(new Request(
+    "https://example.test/api/search?q=horse",
+  )), true);
+  assert.equal(isVisualApiRequest(new Request(
     "https://example.test/api/search?q=horse&searchMode=keyword",
   )), false);
   assert.equal(isVisualApiRequest(new Request(
@@ -44,7 +47,7 @@ test("uses only Cloudflare's client IP as the Visual limiter key", async () => {
   ), limiter);
 
   assert.equal(response, null);
-  assert.deepEqual(keys, ["visual:203.0.113.4"]);
+  assert.deepEqual(keys, ["mnemosyne:visual:203.0.113.4"]);
 });
 
 test("returns a private, retryable 429 when the Visual allowance is spent", async () => {
@@ -67,6 +70,13 @@ test("returns a private, retryable 429 when the Visual allowance is spent", asyn
 });
 
 test("fails open without a trusted IP or when the optional binding fails", async () => {
+  let calls = 0;
+  const counting: RateLimitBinding = {
+    async limit() {
+      calls += 1;
+      return { success: true };
+    },
+  };
   const unavailable: RateLimitBinding = {
     async limit() {
       throw new Error("unavailable");
@@ -75,7 +85,12 @@ test("fails open without a trusted IP or when the optional binding fails", async
 
   assert.equal(await checkVisualRateLimit(new Request(
     "https://example.test/api/search?q=horse&searchMode=embedding",
-  ), unavailable), null);
+  ), counting), null);
+  assert.equal(await checkVisualRateLimit(new Request(
+    "https://example.test/api/search?q=horse&searchMode=embedding",
+    { headers: { "CF-Connecting-IP": "x".repeat(65) } },
+  ), counting), null);
+  assert.equal(calls, 0);
   assert.equal(await checkVisualRateLimit(new Request(
     "https://example.test/api/search?q=horse&searchMode=embedding",
     { headers: { "CF-Connecting-IP": "203.0.113.4" } },

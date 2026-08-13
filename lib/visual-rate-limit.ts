@@ -9,9 +9,10 @@ export function isVisualApiRequest(
 ): boolean {
   if (request.method !== "GET") return false;
   const url = new URL(request.url);
+  const searchMode = url.searchParams.get("searchMode");
   return (
     VISUAL_API_PATHS.has(url.pathname) &&
-    url.searchParams.get("searchMode") === "embedding"
+    (searchMode === null || searchMode === "embedding")
   );
 }
 
@@ -24,11 +25,11 @@ export async function checkVisualRateLimit(
   // Cloudflare sets this header at its edge. Do not trust a browser-controlled
   // forwarded-for header when selecting the limiter key.
   const clientIp = request.headers.get("CF-Connecting-IP")?.trim();
-  if (!clientIp) return null;
+  if (!clientIp || clientIp.length > 64) return null;
 
   try {
     const { success } = await limiter.limit({
-      key: `visual:${clientIp}`,
+      key: `mnemosyne:visual:${clientIp}`,
     });
     if (success) return null;
   } catch {
