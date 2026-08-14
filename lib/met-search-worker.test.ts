@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  aggregateDateRanges,
   handleMetServiceRequest,
   type D1Database,
 } from "../worker/met-search.ts";
@@ -58,10 +59,10 @@ class FixtureStatement {
         ] as T[],
       };
     }
-    if (this.query.includes("SUM(")) {
+    if (this.query.includes("COUNT(*) AS match_count")) {
       return {
         results: [
-          { bin_index: 0, hit_mass: 1, object_count: 1 },
+          { date_start: 1880, date_end: 1880, match_count: 1 },
         ] as T[],
       };
     }
@@ -179,7 +180,9 @@ test("D1 evidence route omits timeline aggregation and preserves keyword slices"
   );
   assert.equal(fixture.queries.some((query) => query.includes("SUM(")), false);
   assert.equal(
-    fixture.queries.some((query) => query.includes("COUNT(*) AS total")),
+    fixture.queries.some(
+      (query) => query.includes("COUNT(*) AS total") && query.includes("FROM artwork_fts"),
+    ),
     false,
   );
 });
@@ -212,6 +215,38 @@ test("D1 search route returns the timeline without querying or hydrating evidenc
     fixture.queries.some((query) => query.includes("FROM met_object_cache")),
     false,
   );
+  assert.equal(
+    fixture.queries.some((query) => query.includes("COUNT(*) AS match_count")),
+    true,
+  );
+  assert.equal(
+    fixture.queries.some((query) => query.includes("JOIN bins ON")),
+    false,
+  );
+  assert.equal(
+    fixture.queries.some(
+      (query) => query.includes("COUNT(*) AS total") && query.includes("FROM artwork_fts"),
+    ),
+    false,
+  );
+});
+
+test("date-range aggregation preserves grouped counts and excludes year zero", () => {
+  const bins = [
+    { bin_start: -10, bin_end: -1 },
+    { bin_start: 0, bin_end: 9 },
+  ];
+  const aggregate = aggregateDateRanges(
+    [
+      { date_start: -2, date_end: 2, match_count: 2 },
+      { date_start: -10, date_end: -1, match_count: 3 },
+    ],
+    bins,
+  );
+
+  assert.equal(aggregate.totalMatches, 5);
+  assert.deepEqual(Array.from(aggregate.hitMass), [4, 1]);
+  assert.deepEqual(Array.from(aggregate.objectCounts), [5, 2]);
 });
 
 test("unauthorized admin responses are private and never cached", async () => {
