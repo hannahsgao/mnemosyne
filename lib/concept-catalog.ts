@@ -49,7 +49,7 @@ type ReleaseManifest = {
     version: string;
     label: string;
     count: number;
-    countingUnit: "physical-object" | "visual-cluster";
+    countingUnit: "physical-object" | "visual-cluster" | "catalog-record";
   };
   model: {
     id: string;
@@ -249,7 +249,11 @@ function parseManifest(payload: unknown): ReleaseManifest {
   const metric = record(source.metric, "Concept release metric");
   const files = record(source.files, "Concept release files");
   const countingUnit = corpus.countingUnit;
-  if (countingUnit !== "physical-object" && countingUnit !== "visual-cluster") {
+  if (
+    countingUnit !== "physical-object" &&
+    countingUnit !== "visual-cluster" &&
+    countingUnit !== "catalog-record"
+  ) {
     throw new Error("Concept release has an unsupported counting unit.");
   }
   return {

@@ -60,16 +60,35 @@ const responses: Record<string, unknown> = {
   },
 };
 
-function fixtureFetch(calls: string[]) {
+function fixtureFetch(calls: string[], overrides: Record<string, unknown> = {}) {
   return (async (input: RequestInfo | URL) => {
     const url = String(input);
     calls.push(url);
-    const payload = responses[url];
+    const payload = url in overrides ? overrides[url] : responses[url];
     return payload === undefined
       ? new Response("missing", { status: 404 })
       : Response.json(payload);
   }) as typeof fetch;
 }
+
+test("accepts catalog-record manifests emitted for combined institutional corpora", async () => {
+  resetConceptCatalogCache();
+  const releaseManifestUrl = "/catalog-data/v1/releases/r1/manifest.json";
+  const manifest = responses[releaseManifestUrl] as Record<string, unknown>;
+  const corpus = manifest.corpus as Record<string, unknown>;
+  const catalog = await loadConceptCatalog({
+    fetch: fixtureFetch([], {
+      [releaseManifestUrl]: {
+        ...manifest,
+        corpus: { ...corpus, countingUnit: "catalog-record" },
+      },
+    }),
+  });
+
+  assert.equal(catalog.manifest.corpus.countingUnit, "catalog-record");
+  const search = await loadConceptSearch(catalog, ["Horse"]);
+  assert.equal(search.corpus.countingUnit, "catalog-record");
+});
 
 test("resolves labels and aliases exactly while exposing the canonical concept", async () => {
   resetConceptCatalogCache();

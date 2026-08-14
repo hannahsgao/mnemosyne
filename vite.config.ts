@@ -8,6 +8,9 @@ const { d1, r2 } = hostingConfig;
 const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
+  cache: {
+    enabled: true,
+  },
   assets: {
     binding: "ASSETS",
   },

@@ -7,8 +7,8 @@ export type SearchMode = (typeof SEARCH_MODES)[number];
 export const DEFAULT_SEARCH_MODE: SearchMode = "embedding";
 
 export const SEARCH_MODE_LABELS: Record<SearchMode, string> = {
-  keyword: "Metadata keywords",
-  embedding: "Visual concepts",
+  keyword: "Metadata search",
+  embedding: "Visual search",
 };
 
 export type SearchPageState = {

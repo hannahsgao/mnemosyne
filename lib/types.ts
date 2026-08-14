@@ -9,7 +9,7 @@ export type CorpusMetadata = {
   version: string;
   label: string;
   count: number | null;
-  countingUnit: "physical-object" | "visual-cluster";
+  countingUnit: "physical-object" | "visual-cluster" | "catalog-record";
   view: string;
   filters: Record<string, string[]>;
 };
@@ -73,6 +73,11 @@ export type SearchSeries = {
   cacheKey?: string;
   /** Available on the live metadata adapter, where the catalogue exposes this count. */
   totalMatches?: number;
+  /**
+   * Closest global visual neighbors when no artwork clears the strict score gate.
+   * These are exploratory results, not timeline contributors.
+   */
+  nearestMatches?: EvidenceArtwork[];
 };
 
 export type EvidenceSliceName =

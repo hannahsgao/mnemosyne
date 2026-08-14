@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { keywordEvidenceSlices, selectedEvidenceItems } from "./evidence.ts";
-import type { EvidenceArtwork, SelectedEvidence } from "./types.ts";
+import {
+  keywordEvidenceSlices,
+  nearestMatchGroups,
+  selectedEvidenceItems,
+} from "./evidence.ts";
+import type { EvidenceArtwork, SearchSeries, SelectedEvidence } from "./types.ts";
 
 function artwork(artworkId: string): EvidenceArtwork {
   return {
@@ -29,6 +33,28 @@ function artwork(artworkId: string): EvidenceArtwork {
 
 function response(selectedEvidence: SelectedEvidence) {
   return { selectedEvidence };
+}
+
+function series(
+  queryId: string,
+  k: number,
+  nearestMatches?: EvidenceArtwork[],
+): SearchSeries {
+  return {
+    queryId,
+    k,
+    threshold: k ? 0.125 : null,
+    lowSignal: k === 0,
+    diagnostics: {
+      standardizedSeparation: null,
+      controlMean: null,
+      controlStdDev: null,
+      promptTopKJaccard: null,
+      reasons: [],
+    },
+    points: [],
+    nearestMatches,
+  };
 }
 
 test("keyword evidence populates the canonical and backward-compatible slices", () => {
@@ -63,4 +89,64 @@ test("frontend evidence selection prefers strongest and falls back to legacy con
     ).map((item) => item.artworkId),
     ["MET_11"],
   );
+});
+
+test("nearest matches are capped at 20 unique works for one all-unmatched search", () => {
+  const first = artwork("MET_0");
+  const nearest = [first, first, ...Array.from({ length: 24 }, (_, index) => artwork(`MET_${index + 1}`))];
+  const groups = nearestMatchGroups({
+    queries: [{ id: "q-lonely", label: "lonely", normalized: "lonely" }],
+    series: [series("q-lonely", 0, nearest)],
+  });
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].query.label, "lonely");
+  assert.equal(groups[0].artworks.length, 20);
+  assert.deepEqual(
+    groups[0].artworks.slice(0, 3).map((item) => item.artworkId),
+    ["MET_0", "MET_1", "MET_2"],
+  );
+  assert.equal(new Set(groups[0].artworks.map((item) => item.artworkId)).size, 20);
+});
+
+test("nearest matches require every term to miss the strict cutoff", () => {
+  assert.deepEqual(nearestMatchGroups({
+    queries: [
+      { id: "q-lonely", label: "lonely", normalized: "lonely" },
+      { id: "q-horse", label: "horse", normalized: "horse" },
+    ],
+    series: [
+      series("q-lonely", 0, [artwork("MET_nearest")]),
+      series("q-horse", 4),
+    ],
+  }), []);
+});
+
+test("multi-term nearest matches share one round-robin budget of 20", () => {
+  const shared = artwork("MET_shared");
+  const groups = nearestMatchGroups({
+    queries: [
+      { id: "q-lonely", label: "lonely", normalized: "lonely" },
+      { id: "q-happy", label: "happy", normalized: "happy" },
+    ],
+    series: [
+      series("q-lonely", 0, [shared, ...Array.from({ length: 20 }, (_, index) => artwork(`L_${index}`))]),
+      series("q-happy", 0, [shared, ...Array.from({ length: 20 }, (_, index) => artwork(`H_${index}`))]),
+    ],
+  });
+
+  const selected = groups.flatMap((group) => group.artworks);
+  assert.equal(groups.length, 2);
+  assert.equal(selected.length, 20);
+  assert.equal(new Set(selected.map((item) => item.artworkId)).size, 20);
+  assert.deepEqual(groups.map((group) => group.artworks.length), [10, 10]);
+  assert.deepEqual(groups[0].artworks.slice(0, 2).map((item) => item.artworkId), ["MET_shared", "L_0"]);
+  assert.deepEqual(groups[1].artworks.slice(0, 2).map((item) => item.artworkId), ["H_0", "H_1"]);
+});
+
+test("nearest matches remain an optional additive contract", () => {
+  assert.deepEqual(nearestMatchGroups({
+    queries: [{ id: "q-lonely", label: "lonely", normalized: "lonely" }],
+    series: [series("q-lonely", 0)],
+  }), []);
 });

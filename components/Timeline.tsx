@@ -31,6 +31,8 @@ type TimelineProps = {
   series: SearchSeries[];
   queries: QueryDescriptor[];
   metric: MetricMetadata;
+  label?: string;
+  description?: string;
   selection: ChartSelection | null;
   hiddenQueryIds: Set<string>;
   onSelect: (selection: ChartSelection) => void;
@@ -166,6 +168,8 @@ export function Timeline({
   series,
   queries,
   metric,
+  label = metric.label,
+  description = metric.description,
   selection,
   hiddenQueryIds,
   onSelect,
@@ -675,7 +679,7 @@ export function Timeline({
     Math.abs(boundedViewport.end - fittedViewport.end) > 0.01;
 
   return (
-    <div className="timeline-wrap" role="group" aria-label={`${metric.label} by time period`}>
+    <div className="timeline-wrap" role="group" aria-label={`${label} by time period`}>
       <svg
         ref={chartRef}
         className="timeline"
@@ -683,7 +687,7 @@ export function Timeline({
         role="img"
         preserveAspectRatio="xMidYMid meet"
       >
-        <title>{`${metric.label} for ${queries.map((query) => query.label).join(", ")}`}</title>
+        <title>{`${label} for ${queries.map((query) => query.label).join(", ")}`}</title>
         <defs>
           <clipPath id="timeline-plot-clip">
             <rect x={padLeft} y={padTop} width={chartWidth} height={chartHeight} />
@@ -914,7 +918,12 @@ export function Timeline({
           </div>
         </div>
       </div>
-      {metric.description && <p className="timeline-note">{metric.description}</p>}
+      {description && (
+        <details className="timeline-note">
+          <summary>How to read this chart</summary>
+          <p>{description}</p>
+        </details>
+      )}
     </div>
   );
 }

@@ -2,39 +2,23 @@
 
 import {
   type FormEvent,
-  type KeyboardEvent,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { Timeline } from "../components/Timeline";
+import { nearestMatchGroups, selectedEvidenceItems } from "../lib/evidence";
 import {
-  defaultConceptSelection,
-  loadConceptCatalog,
-  loadConceptEvidence,
-  loadConceptSearch,
-  resolveConcept,
-  suggestConcepts,
-  UnknownConceptError,
-  type ConceptCatalog,
-  type ConceptResolution,
-  type ConceptSuggestion,
-} from "../lib/concept-catalog";
-import { selectedEvidenceItems } from "../lib/evidence";
-import {
-  activeQueryFragment,
   evidenceMatchesSelection,
-  formatQueryTerm,
   invalidSearchStatus,
   invalidateExplorerRequests,
   prepareEvidenceRequest,
-  replaceActiveQueryFragment,
-  retryablePromise,
   searchErrorPlacement,
 } from "../lib/explorer-state";
-import { MAX_QUERY_LENGTH, normalizeQueryTerm, parseConceptQuery, QuerySyntaxError } from "../lib/query";
+import { MAX_QUERY_LENGTH, parseConceptQuery, QuerySyntaxError } from "../lib/query";
 import { requestKeywordEvidence, requestKeywordSearch } from "../lib/keyword-transport";
+import { requestVisualEvidence, requestVisualSearch } from "../lib/visual-transport";
 import {
   DEFAULT_SEARCH_MODE,
   pageUrlForSearchState,
@@ -51,15 +35,47 @@ import type {
   SelectedEvidence,
 } from "../lib/types";
 
-const INITIAL_QUERY = "Horse, Ship";
+const INITIAL_QUERY = "ship, harbor, bridge";
 const EXAMPLE_QUERIES = [
-  "Flowers, Mountain, Moon",
-  "Portrait, Mother and child",
-  "Armor, Sword, Crown",
-  "Landscape, Geometric ornament",
-  "Battle, Procession",
+  "mirror, portrait, self-portrait",
+  "clock, chair, table, lamp",
+  "ship, harbor, bridge",
+  "mother and child, portrait, self-portrait",
+  "crown, bonnet, top hat, bowler hat",
+];
+const METADATA_EXAMPLE_QUERIES = [
+  "woodcut, engraving, etching, lithograph, screenprint",
+  "daguerreotype, albumen silver print, gelatin silver print, chromogenic print, inkjet print",
+  "manuscript, printed book, newspaper",
+  "bronze, marble, porcelain, plastic",
+  "carriage, automobile, airplane",
 ];
 const INITIAL_VISIBLE_WORKS = 5;
+
+const SEARCH_INPUT_LABELS: Record<SearchMode, string> = {
+  embedding: "Search artworks by visual content",
+  keyword: "Search artwork catalogue metadata",
+};
+
+const SEARCH_PLACEHOLDERS: Record<SearchMode, string> = {
+  embedding: "mirror, portrait, self-portrait",
+  keyword: "carriage, automobile, airplane",
+};
+
+const SEARCH_MODE_TITLES: Record<SearchMode, string> = {
+  embedding: "Search for what appears in the artwork",
+  keyword: "Search titles, artists, tags, and catalogue text",
+};
+
+const SEARCH_MODE_HELP: Record<SearchMode, string> = {
+  embedding: "Describe what you want to see.",
+  keyword: "Search words in the catalogue record.",
+};
+
+const CHART_HELP: Record<SearchMode, string> = {
+  embedding: "Higher values mean visual matches are more concentrated in that period than across the collection overall. Gaps mark periods with too little evidence.",
+  keyword: "Higher values mean a larger share of dated catalogue records match in that period. Gaps mark periods with too little evidence.",
+};
 
 type SearchOptions = {
   syncInput?: boolean;
@@ -74,14 +90,8 @@ type EvidenceEnvelope = {
 
 type EvidenceContext = {
   baseResult?: SearchResponse;
-  catalog?: ConceptCatalog;
   query?: string;
   mode?: SearchMode;
-};
-
-type UnknownPrompt = {
-  input: string;
-  suggestions: ConceptSuggestion[];
 };
 
 function isSearchResponse(value: unknown): value is SearchResponse {
@@ -124,7 +134,7 @@ function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
         )}
       </div>
       <div className="artwork-copy">
-        <strong title={artwork.title}>{artwork.title}</strong>
+        <strong title={artwork.title || "Untitled"}>{artwork.title || "Untitled"}</strong>
         <span title={artwork.artist}>{artwork.artist || "Unknown artist"}</span>
         <small>{artwork.dateDisplay} ↗</small>
       </div>
@@ -132,38 +142,17 @@ function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
   );
 }
 
-function urlSelection(selection: ChartSelection | null, mode: SearchMode) {
-  if (!selection || mode !== "embedding") return selection;
-  return { ...selection, queryId: selection.queryId.replace(/^concept:/, "") };
-}
-
 function selectionFromRequestedState(
   response: SearchResponse,
   requested: ChartSelection | null | undefined,
-  mode: SearchMode,
 ) {
   if (!requested) return null;
-  const queryId = mode === "embedding" && !requested.queryId.startsWith("concept:")
-    ? `concept:${requested.queryId}`
-    : requested.queryId;
-  const series = response.series.find((item) => item.queryId === queryId);
+  const series = response.series.find((item) => item.queryId === requested.queryId);
   if (!series?.points.some((point) => point.binKey === requested.binKey)) return null;
   if (response.bins.find((bin) => bin.key === requested.binKey)?.belowMinimumDenominator === true) {
     return null;
   }
-  return { queryId, binKey: requested.binKey };
-}
-
-function replaceUnknownQueryTerm(value: string, unknown: string, replacement: string) {
-  try {
-    const unknownNormalized = normalizeQueryTerm(unknown);
-    return parseConceptQuery(value)
-      .map((term) => term.normalized === unknownNormalized ? replacement : term.label)
-      .map(formatQueryTerm)
-      .join(", ");
-  } catch {
-    return replacement;
-  }
+  return requested;
 }
 
 export default function Home() {
@@ -173,35 +162,22 @@ export default function Home() {
   const [submittedSearchMode, setSubmittedSearchMode] = useState<SearchMode>(DEFAULT_SEARCH_MODE);
   const [result, setResult] = useState<SearchResponse | null>(null);
   const [selection, setSelection] = useState<ChartSelection | null>(null);
-  const [resolutions, setResolutions] = useState<ConceptResolution[]>([]);
-  const [unknownPrompt, setUnknownPrompt] = useState<UnknownPrompt | null>(null);
   const [hiddenQueryIds, setHiddenQueryIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [showAllExamples, setShowAllExamples] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
-  const [catalog, setCatalog] = useState<ConceptCatalog | null>(null);
-  const [autocompleteOpen, setAutocompleteOpen] = useState(false);
-  const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0);
   const requestId = useRef(0);
   const evidenceRequestId = useRef(0);
   const searchAbort = useRef<AbortController | null>(null);
   const evidenceAbort = useRef<AbortController | null>(null);
-  const catalogPromise = useRef<Promise<ConceptCatalog> | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  async function ensureCatalog() {
-    const loaded = await retryablePromise(catalogPromise, () => loadConceptCatalog());
-    setCatalog((current) => current ?? loaded);
-    return loaded;
-  }
 
   function replacePageState(query: string, mode: SearchMode, nextSelection: ChartSelection | null) {
     const nextUrl = pageUrlForSearchState(window.location.href, {
       query,
       mode,
-      selection: urlSelection(nextSelection, mode),
+      selection: nextSelection,
     });
     window.history.replaceState(window.history.state, "", nextUrl);
   }
@@ -223,9 +199,8 @@ export default function Home() {
     evidenceAbort.current = null;
     const currentRequest = invalidated.searchRequestId;
 
-    let parsed;
     try {
-      parsed = parseConceptQuery(nextQuery);
+      parseConceptQuery(nextQuery);
     } catch (caught) {
       const status = invalidSearchStatus(
         caught instanceof QuerySyntaxError ? caught.message : "Check the query and try again.",
@@ -234,8 +209,6 @@ export default function Home() {
       setLoading(status.loading);
       setEvidenceLoading(status.evidenceLoading);
       setEvidenceError(null);
-      setUnknownPrompt(null);
-      setAutocompleteOpen(false);
       return;
     }
 
@@ -251,34 +224,33 @@ export default function Home() {
     setEvidenceLoading(false);
     setError(null);
     setEvidenceError(null);
-    setUnknownPrompt(null);
-    setResolutions([]);
     setSelection(null);
     setShowAllExamples(false);
     setHiddenQueryIds(new Set());
-    setAutocompleteOpen(false);
 
     try {
       let payload: SearchResponse;
-      let loadedCatalog: ConceptCatalog | undefined;
-      let nextResolutions: ConceptResolution[] = [];
 
-      if (nextMode === "embedding") {
-        loadedCatalog = await ensureCatalog();
-        nextResolutions = parsed.map((term) => {
-          const resolved = resolveConcept(loadedCatalog!, term.label);
-          if (!resolved) {
-            throw new UnknownConceptError(term.label, suggestConcepts(loadedCatalog!, term.label, 4));
-          }
-          return resolved;
-        });
-        payload = await loadConceptSearch(loadedCatalog, nextResolutions);
-      } else {
+      if (nextMode === "keyword") {
         const { response, payload: body } = await requestKeywordSearch(trimmedQuery, {
           signal: controller.signal,
         });
         if (!response.ok) throw new Error(errorMessage(body, "Search failed."));
         if (!isSearchResponse(body)) throw new Error("The search service returned an unsupported response.");
+        payload = body;
+      } else {
+        const { response, payload: body } = await requestVisualSearch(trimmedQuery, {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(errorMessage(
+            body,
+            "Visual search is unavailable.",
+          ));
+        }
+        if (!isSearchResponse(body)) {
+          throw new Error("Visual search returned an unsupported response.");
+        }
         payload = body;
       }
 
@@ -286,16 +258,12 @@ export default function Home() {
       const requestedSelection = selectionFromRequestedState(
         payload,
         options.requestedSelection,
-        nextMode,
       );
       const nextSelection = requestedSelection ?? (
-        nextMode === "embedding" && loadedCatalog
-          ? defaultConceptSelection(loadedCatalog, payload)
-          : payload.selectedEvidence
-            ? { queryId: payload.selectedEvidence.queryId, binKey: payload.selectedEvidence.binKey }
-            : peakSelection(payload)
+        payload.selectedEvidence
+          ? { queryId: payload.selectedEvidence.queryId, binKey: payload.selectedEvidence.binKey }
+          : peakSelection(payload)
       );
-      setResolutions(nextResolutions);
       setResult(payload);
       setSelection(nextSelection);
       replacePageState(trimmedQuery, nextMode, nextSelection);
@@ -304,7 +272,6 @@ export default function Home() {
           if (requestId.current !== currentRequest) return;
           void loadEvidence(nextSelection, {
             baseResult: payload,
-            catalog: loadedCatalog,
             query: trimmedQuery,
             mode: nextMode,
           });
@@ -313,13 +280,12 @@ export default function Home() {
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") return;
       if (requestId.current !== currentRequest) return;
-      if (caught instanceof UnknownConceptError) {
-        setUnknownPrompt({ input: caught.input, suggestions: caught.suggestions });
-      }
-      setError(caught instanceof Error ? caught.message : "Search failed.");
+      const message = caught instanceof Error ? caught.message : "Search failed.";
+      setError(nextMode === "embedding" && caught instanceof TypeError
+        ? "Visual search is unavailable."
+        : message);
       setResult(null);
       setSelection(null);
-      setResolutions([]);
     } finally {
       if (requestId.current === currentRequest) setLoading(false);
     }
@@ -350,14 +316,7 @@ export default function Home() {
     const controller = prepared.controller!;
     try {
       let selectedEvidence: SelectedEvidence | null;
-      if (activeMode === "embedding") {
-        const activeCatalog = context.catalog ?? catalog ?? await ensureCatalog();
-        selectedEvidence = await loadConceptEvidence(
-          activeCatalog,
-          nextSelection.queryId,
-          nextSelection.binKey,
-        );
-      } else {
+      if (activeMode === "keyword") {
         const { response, payload } = await requestKeywordEvidence(
           activeQuery,
           nextSelection,
@@ -366,6 +325,22 @@ export default function Home() {
         if (!response.ok) throw new Error(errorMessage(payload, "Evidence could not be loaded."));
         if (!isEvidenceEnvelope(payload)) {
           throw new Error("The evidence service returned unsupported evidence.");
+        }
+        selectedEvidence = payload.selectedEvidence;
+      } else {
+        const { response, payload } = await requestVisualEvidence(
+          activeQuery,
+          nextSelection,
+          { signal: controller.signal },
+        );
+        if (!response.ok) {
+          throw new Error(errorMessage(
+            payload,
+            "Visual evidence is unavailable.",
+          ));
+        }
+        if (!isEvidenceEnvelope(payload)) {
+          throw new Error("Visual search returned unsupported evidence.");
         }
         selectedEvidence = payload.selectedEvidence;
       }
@@ -393,21 +368,13 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const queryFragment = activeQueryFragment(input);
-  const autocompleteSuggestions = useMemo(
-    () => searchMode === "embedding" && catalog && autocompleteOpen
-      ? suggestConcepts(catalog, queryFragment, 7)
-      : [],
-    [autocompleteOpen, catalog, queryFragment, searchMode],
-  );
-  useEffect(() => setActiveSuggestionIndex(0), [queryFragment, autocompleteOpen]);
-
-  const aliasResolutions = resolutions.filter((item) =>
-    item.matchedBy === "alias" || item.requestedNormalized !== item.concept.normalized
-  );
   const evidenceItems = useMemo(
     () => selectedEvidenceItems(result, selection),
     [result, selection],
+  );
+  const nearestGroups = useMemo(
+    () => submittedSearchMode === "embedding" ? nearestMatchGroups(result) : [],
+    [result, submittedSearchMode],
   );
   const visibleItems = evidenceItems.slice(0, showAllExamples ? evidenceItems.length : INITIAL_VISIBLE_WORKS);
   const hiddenExampleCount = Math.max(0, evidenceItems.length - INITIAL_VISIBLE_WORKS);
@@ -423,10 +390,17 @@ export default function Home() {
     : null;
   const displayedBins = result?.bins.length ? timelineWindow(result.bins) : [];
   const hasChartPoints = result?.series.some((series) => series.points.length > 0) ?? false;
+  const allTermsUnmatched = Boolean(
+    result?.series.length && result.series.every((series) => series.k === 0),
+  );
   const yearRange = displayedBins.length
     ? `${formatTimelineYear(displayedBins[0].start)}–${formatTimelineYear(displayedBins[displayedBins.length - 1].end)}`
     : "";
   const errorPlacement = searchErrorPlacement(error, result !== null);
+  const exampleQueries = searchMode === "embedding" ? EXAMPLE_QUERIES : METADATA_EXAMPLE_QUERIES;
+  const resultsTitle = submittedSearchMode === "embedding"
+    ? "Visual matches over time"
+    : "Metadata matches over time";
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -436,42 +410,6 @@ export default function Home() {
   function changeSearchMode(nextMode: SearchMode) {
     if (nextMode === searchMode) return;
     void search(input, nextMode, { syncInput: false });
-  }
-
-  function chooseSuggestion(suggestion: ConceptSuggestion) {
-    const next = replaceActiveQueryFragment(input, suggestion.concept.label);
-    setInput(next);
-    setAutocompleteOpen(false);
-    inputRef.current?.focus();
-  }
-
-  function handleSearchKeyDown(event: KeyboardEvent<HTMLInputElement>) {
-    if (!autocompleteOpen || !autocompleteSuggestions.length) {
-      if (event.key === "ArrowDown" && searchMode === "embedding") setAutocompleteOpen(true);
-      return;
-    }
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setActiveSuggestionIndex((current) => (current + 1) % autocompleteSuggestions.length);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActiveSuggestionIndex((current) =>
-        (current - 1 + autocompleteSuggestions.length) % autocompleteSuggestions.length
-      );
-    } else if (event.key === "Enter") {
-      event.preventDefault();
-      chooseSuggestion(autocompleteSuggestions[activeSuggestionIndex] ?? autocompleteSuggestions[0]);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      setAutocompleteOpen(false);
-    }
-  }
-
-  function applyUnknownSuggestion(suggestion: ConceptSuggestion) {
-    if (!unknownPrompt) return;
-    const next = replaceUnknownQueryTerm(input, unknownPrompt.input, suggestion.concept.label);
-    setInput(next);
-    void search(next, searchMode);
   }
 
   function activateSeries(queryId: string) {
@@ -502,112 +440,56 @@ export default function Home() {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
+      <header className="topbar" id="top">
         <a className="wordmark" href="#top" aria-label="Mnemosyne home">Mnemosyne</a>
       </header>
 
-      <div className="workspace" id="top">
-        <section className="search-area" aria-labelledby="page-title">
-          <div className="intro">
-            <h1 id="page-title">Trace a visual idea through art history</h1>
-            <p>Compare up to five precomputed visual concepts across The Met’s public-domain image collection, or switch to catalogue metadata keywords.</p>
-          </div>
-
+      <div className="workspace">
+        <section className="search-area" aria-label="Search The Met collection">
           <div className="search-controls">
-            <form className="search-form" onSubmit={submit}>
-              <label className="sr-only" htmlFor="concept-search">
-                {searchMode === "embedding" ? "Compare visual concepts" : "Search metadata keywords"}
-              </label>
-              <div className="search-input-wrap">
-                <input
-                  ref={inputRef}
-                  id="concept-search"
-                  value={input}
-                  onChange={(event) => {
-                    setInput(event.target.value);
-                    setAutocompleteOpen(searchMode === "embedding");
-                  }}
-                  onFocus={() => {
-                    if (searchMode !== "embedding") return;
-                    setAutocompleteOpen(true);
-                    void ensureCatalog().catch(() => undefined);
-                  }}
-                  onBlur={() => setAutocompleteOpen(false)}
-                  onKeyDown={handleSearchKeyDown}
-                  placeholder={searchMode === "embedding" ? "Horse, Ship" : "industry, machine, skyscraper"}
-                  maxLength={MAX_QUERY_LENGTH}
-                  aria-describedby="query-help"
-                  role="combobox"
-                  aria-autocomplete="list"
-                  aria-controls="concept-suggestions"
-                  aria-expanded={autocompleteOpen && autocompleteSuggestions.length > 0}
-                  aria-activedescendant={autocompleteOpen && autocompleteSuggestions.length
-                    ? `concept-suggestion-${activeSuggestionIndex}`
-                    : undefined}
-                />
-                {autocompleteOpen && autocompleteSuggestions.length > 0 && (
-                  <ul className="autocomplete-list" id="concept-suggestions" role="listbox">
-                    {autocompleteSuggestions.map((suggestion, index) => (
-                      <li
-                        className="autocomplete-option"
-                        id={`concept-suggestion-${index}`}
-                        key={suggestion.concept.id}
-                        role="option"
-                        aria-selected={index === activeSuggestionIndex}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onMouseEnter={() => setActiveSuggestionIndex(index)}
-                        onClick={() => chooseSuggestion(suggestion)}
-                      >
-                        <strong>{suggestion.concept.label}</strong>
-                        <span>
-                          {suggestion.matchedBy === "alias"
-                            ? `${suggestion.matchedText} → ${suggestion.concept.label}`
-                            : suggestion.concept.category ?? "Visual concept"}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-              <button type="submit" disabled={loading}>{loading ? "Searching…" : "Search"}</button>
-            </form>
-
-            <div className="search-mode-row">
-              <span>Search by</span>
+            <div className="search-toolbar">
               <span className="search-mode-toggle" role="group" aria-label="Search method">
                 {SEARCH_MODES.map((mode) => (
                   <button
                     key={mode}
                     type="button"
                     aria-pressed={searchMode === mode}
-                    title={mode === "keyword"
-                      ? "Match words in catalogue metadata"
-                      : "Use precomputed image-embedding timelines for curated concepts"}
+                    title={SEARCH_MODE_TITLES[mode]}
                     onClick={() => changeSearchMode(mode)}
                   >
                     {SEARCH_MODE_LABELS[mode]}
                   </button>
                 ))}
               </span>
+
+              <form className="search-form" onSubmit={submit}>
+                <label className="sr-only" htmlFor="concept-search">
+                  {SEARCH_INPUT_LABELS[searchMode]}
+                </label>
+                <div className="search-input-wrap">
+                  <input
+                    id="concept-search"
+                    value={input}
+                    onChange={(event) => setInput(event.target.value)}
+                    placeholder={SEARCH_PLACEHOLDERS[searchMode]}
+                    maxLength={MAX_QUERY_LENGTH}
+                    aria-describedby="query-help"
+                  />
+                </div>
+                <button type="submit" disabled={loading}>
+                  {loading ? "Searching…" : "Search"}
+                </button>
+              </form>
             </div>
 
             <div className="query-row" id="query-help">
-              <span>{searchMode === "embedding" ? "Curated concepts:" : "Try:"}</span>
-              {EXAMPLE_QUERIES.map((example) => (
+              <span className="search-mode-help">{SEARCH_MODE_HELP[searchMode]}</span>
+              <span>Try:</span>
+              {exampleQueries.map((example) => (
                 <button key={example} type="button" onClick={() => void search(example, searchMode)}>{example}</button>
               ))}
             </div>
 
-            {submittedSearchMode === "embedding" && aliasResolutions.length > 0 && (
-              <div className="resolution-row" aria-label="Resolved visual concept aliases">
-                <strong>Resolved:</strong>
-                {aliasResolutions.map((item) => (
-                  <span className="resolution-pill" key={`${item.requestedNormalized}:${item.concept.id}`}>
-                    {item.requested} → <strong>{item.concept.label}</strong>
-                  </span>
-                ))}
-              </div>
-            )}
             {errorPlacement === "inline" && <div className="search-error" role="alert">{error}</div>}
           </div>
         </section>
@@ -615,26 +497,29 @@ export default function Home() {
         <section className="results" aria-live="polite" aria-busy={loading}>
           <div className="results-heading">
             <div>
-              <h2>{loading ? "Searching the collection…" : result?.metric.label ?? "Results over time"}</h2>
+              <h2>
+                {loading
+                  ? submittedSearchMode === "embedding"
+                    ? "Searching artworks…"
+                    : "Searching the catalogue…"
+                  : resultsTitle}
+              </h2>
               {!loading && yearRange && <span>{yearRange}</span>}
             </div>
-            {result && !loading && <p>{result.queries.length} series · {result.corpus.label}</p>}
+            {result && !loading && (
+              <p>
+                {result.queries.length} {result.queries.length === 1 ? "term" : "terms"} · The Met public-domain collection
+              </p>
+            )}
           </div>
 
           {errorPlacement === "empty" && (
             <div className="message-state" role="alert">
               <span>{error}</span>
-              {unknownPrompt && unknownPrompt.suggestions.length > 0 && (
-                <span className="unknown-suggestions">
-                  <span>Did you mean</span>
-                  {unknownPrompt.suggestions.map((suggestion) => (
-                    <button key={suggestion.concept.id} type="button" onClick={() => applyUnknownSuggestion(suggestion)}>
-                      {suggestion.concept.label}
-                    </button>
-                  ))}
-                </span>
-              )}
             </div>
+          )}
+          {loading && submittedSearchMode === "embedding" && (
+            <p className="cold-start-note">A new visual search can take a moment.</p>
           )}
           {loading && <div className="chart-skeleton" />}
           {!loading && result && result.bins.length > 0 && hasChartPoints && (
@@ -643,6 +528,8 @@ export default function Home() {
               series={result.series}
               queries={result.queries}
               metric={result.metric}
+              label={resultsTitle}
+              description={CHART_HELP[submittedSearchMode]}
               selection={selection}
               hiddenQueryIds={hiddenQueryIds}
               onSelect={(nextSelection) => void loadEvidence(nextSelection)}
@@ -655,45 +542,73 @@ export default function Home() {
           )}
           {!loading && !error && result && result.bins.length > 0 && !hasChartPoints && (
             <div className="message-state">
-              {submittedSearchMode === "embedding"
-                ? "No dated visual matches passed the score cutoff. Empty periods mean insufficient evidence, not zero historical prevalence."
-                : "No dated artworks matched these metadata keywords."}
+              {submittedSearchMode === "keyword"
+                ? "No dated artworks matched these metadata keywords."
+                : allTermsUnmatched && nearestGroups.length
+                  ? "None of the search terms produced a strong visual match. The closest artworks are shown below."
+                  : "No strong visual matches were found in the dated collection."}
             </div>
           )}
         </section>
 
-        <section className="evidence" aria-label="Evidence for the selected chart point">
+        {!loading && !error && nearestGroups.length > 0 && (
+          <section className="nearest-results" aria-labelledby="nearest-results-heading" aria-live="polite">
+            <div className="evidence-heading">
+              <h2 id="nearest-results-heading">Closest visual results</h2>
+              <p>Below the strong-match cutoff</p>
+            </div>
+            <p className="nearest-results-note">
+              These are the most visually similar artworks the search found, but none met the cutoff for timeline evidence.
+            </p>
+            {nearestGroups.map(({ query, artworks }) => (
+              <div className="nearest-result-group" key={query.id}>
+                <div className="nearest-result-heading">
+                  <h3>No strong visual matches for “{query.label}”</h3>
+                  <p>Showing {artworks.length} closest work{artworks.length === 1 ? "" : "s"}</p>
+                </div>
+                <div className="artwork-grid">
+                  {artworks.map((artwork) => (
+                    <ArtworkCard key={artwork.artworkId} artwork={artwork} />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </section>
+        )}
+
+        {(hasChartPoints || !nearestGroups.length) && (
+          <section className="evidence" aria-label="Artworks for the selected chart point">
           <div className="evidence-heading">
             <h2>
               {!selection || !selectedQuery || !selectedBin
-                ? "Select a line and period"
+                ? "Select a point on the chart to see artworks"
                 : `${selectedQuery.label} · ${selectedBin.label}`}
             </h2>
-            {selectedPoint && submittedSearchMode !== "embedding" && (
-              <p>{selectedPoint.objectCount} contributing work{selectedPoint.objectCount === 1 ? "" : "s"}</p>
+            {selectedPoint && submittedSearchMode === "keyword" && (
+              <p>{selectedPoint.objectCount} matching work{selectedPoint.objectCount === 1 ? "" : "s"}</p>
             )}
-            {selectedPoint && submittedSearchMode === "embedding" && (
+            {selectedPoint && submittedSearchMode !== "keyword" && (
               <p>
                 {evidenceLoading
-                  ? "Loading visual matches…"
+                  ? "Loading artworks…"
                   : evidenceError
-                    ? "Evidence unavailable"
-                    : `${selectedEvidence?.contributorCount ?? 0} visual match${(selectedEvidence?.contributorCount ?? 0) === 1 ? "" : "es"}`}
+                    ? "Artworks unavailable"
+                    : `${selectedEvidence?.contributorCount ?? 0} matching work${(selectedEvidence?.contributorCount ?? 0) === 1 ? "" : "s"}`}
               </p>
             )}
           </div>
 
           {evidenceError && <p className="evidence-error" role="alert">{evidenceError}</p>}
           <div className="artwork-grid" aria-busy={evidenceLoading}>
-            {evidenceLoading && <p className="no-works">Loading evidence…</p>}
+            {evidenceLoading && <p className="no-works">Loading artworks…</p>}
             {!evidenceLoading && visibleItems.map((artwork) => (
               <ArtworkCard key={artwork.artworkId} artwork={artwork} />
             ))}
             {!evidenceLoading && !evidenceError && selection && evidenceItems.length === 0 && !loading && (
               <p className="no-works">
-                {submittedSearchMode === "embedding"
-                  ? "No visual matches passed the score cutoff in this period."
-                  : "No keyword matches in this period."}
+                {submittedSearchMode === "keyword"
+                  ? "No keyword matches in this period."
+                  : "No strong visual matches in this period."}
               </p>
             )}
           </div>
@@ -705,11 +620,16 @@ export default function Home() {
               onClick={() => setShowAllExamples((current) => !current)}
             >
               {showAllExamples
-                ? "Show fewer matches"
-                : `Show ${hiddenExampleCount} more match${hiddenExampleCount === 1 ? "" : "es"}`}
+                ? "Show fewer works"
+                : `Show ${hiddenExampleCount} more work${hiddenExampleCount === 1 ? "" : "s"}`}
             </button>
           )}
-        </section>
+          </section>
+        )}
+
+        <footer className="source-footer">
+          Public-domain artwork images and catalogue data from The Metropolitan Museum of Art Open Access collection.
+        </footer>
       </div>
     </main>
   );
