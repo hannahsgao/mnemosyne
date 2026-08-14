@@ -35,34 +35,20 @@ import type {
   SelectedEvidence,
 } from "../lib/types";
 
-type ExampleQuery = Readonly<{
-  label: string;
-  query: string;
-}>;
-
 const INITIAL_QUERY = "ship, harbor, bridge";
-const EXAMPLE_QUERIES: readonly ExampleQuery[] = [
-  { label: "Self-image", query: "mirror, portrait, self-portrait" },
-  { label: "The modern interior", query: "clock, chair, table, lamp" },
-  { label: "A connected world", query: "ship, harbor, bridge" },
-  { label: "From icon to individual", query: "mother and child, portrait, self-portrait" },
-  { label: "Power & fashion", query: "crown, bonnet, top hat, bowler hat" },
+const EXAMPLE_QUERIES = [
+  "mirror, portrait, self-portrait",
+  "clock, chair, table, lamp",
+  "ship, harbor, bridge",
+  "mother and child, portrait, self-portrait",
+  "crown, bonnet, top hat, bowler hat",
 ];
-const METADATA_EXAMPLE_QUERIES: readonly ExampleQuery[] = [
-  {
-    label: "Printmaking's relay race",
-    query: "woodcut, engraving, etching, lithograph, screenprint",
-  },
-  {
-    label: "Photography's family tree",
-    query: "daguerreotype, albumen silver print, gelatin silver print, chromogenic print, inkjet print",
-  },
-  {
-    label: "From manuscript to mass media",
-    query: "manuscript, printed book, newspaper",
-  },
-  { label: "From bronze to plastic", query: "bronze, marble, porcelain, plastic" },
-  { label: "Modernity in motion", query: "carriage, automobile, airplane" },
+const METADATA_EXAMPLE_QUERIES = [
+  "woodcut, engraving, etching, lithograph, screenprint",
+  "daguerreotype, albumen silver print, gelatin silver print, chromogenic print, inkjet print",
+  "manuscript, printed book, newspaper",
+  "bronze, marble, porcelain, plastic",
+  "carriage, automobile, airplane",
 ];
 const INITIAL_VISIBLE_WORKS = 5;
 
@@ -485,14 +471,7 @@ export default function Home() {
             <div className="query-row" id="query-help">
               <span>Try:</span>
               {exampleQueries.map((example) => (
-                <button
-                  key={example.query}
-                  type="button"
-                  title={example.query}
-                  onClick={() => void search(example.query, searchMode)}
-                >
-                  {example.label}
-                </button>
+                <button key={example} type="button" onClick={() => void search(example, searchMode)}>{example}</button>
               ))}
             </div>
 
