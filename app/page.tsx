@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 import { Timeline } from "../components/Timeline";
-import { selectedEvidenceItems } from "../lib/evidence";
+import { nearestMatchGroups, selectedEvidenceItems } from "../lib/evidence";
 import {
   evidenceMatchesSelection,
   invalidSearchStatus,
@@ -63,8 +63,18 @@ const SEARCH_PLACEHOLDERS: Record<SearchMode, string> = {
 };
 
 const SEARCH_MODE_TITLES: Record<SearchMode, string> = {
-  embedding: "Find artworks whose image embeddings match newly embedded text",
-  keyword: "Match catalogue titles, tags, artists, and other metadata",
+  embedding: "Search for what appears in the artwork",
+  keyword: "Search titles, artists, tags, and catalogue text",
+};
+
+const SEARCH_MODE_HELP: Record<SearchMode, string> = {
+  embedding: "Describe what you want to see.",
+  keyword: "Search words in the catalogue record.",
+};
+
+const CHART_HELP: Record<SearchMode, string> = {
+  embedding: "Higher values mean visual matches are more concentrated in that period than across the collection overall. Gaps mark periods with too little evidence.",
+  keyword: "Higher values mean a larger share of dated catalogue records match in that period. Gaps mark periods with too little evidence.",
 };
 
 type SearchOptions = {
@@ -124,7 +134,7 @@ function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
         )}
       </div>
       <div className="artwork-copy">
-        <strong title={artwork.title}>{artwork.title}</strong>
+        <strong title={artwork.title || "Untitled"}>{artwork.title || "Untitled"}</strong>
         <span title={artwork.artist}>{artwork.artist || "Unknown artist"}</span>
         <small>{artwork.dateDisplay} ↗</small>
       </div>
@@ -362,6 +372,10 @@ export default function Home() {
     () => selectedEvidenceItems(result, selection),
     [result, selection],
   );
+  const nearestGroups = useMemo(
+    () => submittedSearchMode === "embedding" ? nearestMatchGroups(result) : [],
+    [result, submittedSearchMode],
+  );
   const visibleItems = evidenceItems.slice(0, showAllExamples ? evidenceItems.length : INITIAL_VISIBLE_WORKS);
   const hiddenExampleCount = Math.max(0, evidenceItems.length - INITIAL_VISIBLE_WORKS);
   const selectedQuery = result?.queries.find((query) => query.id === selection?.queryId) ?? null;
@@ -376,11 +390,17 @@ export default function Home() {
     : null;
   const displayedBins = result?.bins.length ? timelineWindow(result.bins) : [];
   const hasChartPoints = result?.series.some((series) => series.points.length > 0) ?? false;
+  const allTermsUnmatched = Boolean(
+    result?.series.length && result.series.every((series) => series.k === 0),
+  );
   const yearRange = displayedBins.length
     ? `${formatTimelineYear(displayedBins[0].start)}–${formatTimelineYear(displayedBins[displayedBins.length - 1].end)}`
     : "";
   const errorPlacement = searchErrorPlacement(error, result !== null);
   const exampleQueries = searchMode === "embedding" ? EXAMPLE_QUERIES : METADATA_EXAMPLE_QUERIES;
+  const resultsTitle = submittedSearchMode === "embedding"
+    ? "Visual matches over time"
+    : "Metadata matches over time";
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -420,39 +440,14 @@ export default function Home() {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
+      <header className="topbar" id="top">
         <a className="wordmark" href="#top" aria-label="Mnemosyne home">Mnemosyne</a>
       </header>
 
-      <div className="workspace" id="top">
-        <section className="search-area" aria-labelledby="page-title">
-          <div className="intro">
-            <h1 id="page-title">Trace a visual idea through art history</h1>
-            <p>Search catalogue metadata or describe anything you want to find visually in the artworks.</p>
-          </div>
-
+      <div className="workspace">
+        <section className="search-area" aria-label="Search The Met collection">
           <div className="search-controls">
-            <form className="search-form" onSubmit={submit}>
-              <label className="sr-only" htmlFor="concept-search">
-                {SEARCH_INPUT_LABELS[searchMode]}
-              </label>
-              <div className="search-input-wrap">
-                <input
-                  id="concept-search"
-                  value={input}
-                  onChange={(event) => setInput(event.target.value)}
-                  placeholder={SEARCH_PLACEHOLDERS[searchMode]}
-                  maxLength={MAX_QUERY_LENGTH}
-                  aria-describedby="query-help"
-                />
-              </div>
-              <button type="submit" disabled={loading}>
-                {loading ? "Searching…" : "Search"}
-              </button>
-            </form>
-
-            <div className="search-mode-row">
-              <span>Search by</span>
+            <div className="search-toolbar">
               <span className="search-mode-toggle" role="group" aria-label="Search method">
                 {SEARCH_MODES.map((mode) => (
                   <button
@@ -466,9 +461,29 @@ export default function Home() {
                   </button>
                 ))}
               </span>
+
+              <form className="search-form" onSubmit={submit}>
+                <label className="sr-only" htmlFor="concept-search">
+                  {SEARCH_INPUT_LABELS[searchMode]}
+                </label>
+                <div className="search-input-wrap">
+                  <input
+                    id="concept-search"
+                    value={input}
+                    onChange={(event) => setInput(event.target.value)}
+                    placeholder={SEARCH_PLACEHOLDERS[searchMode]}
+                    maxLength={MAX_QUERY_LENGTH}
+                    aria-describedby="query-help"
+                  />
+                </div>
+                <button type="submit" disabled={loading}>
+                  {loading ? "Searching…" : "Search"}
+                </button>
+              </form>
             </div>
 
             <div className="query-row" id="query-help">
+              <span className="search-mode-help">{SEARCH_MODE_HELP[searchMode]}</span>
               <span>Try:</span>
               {exampleQueries.map((example) => (
                 <button key={example} type="button" onClick={() => void search(example, searchMode)}>{example}</button>
@@ -485,13 +500,17 @@ export default function Home() {
               <h2>
                 {loading
                   ? submittedSearchMode === "embedding"
-                    ? "Searching visual content…"
-                    : "Searching catalogue metadata…"
-                  : result?.metric.label ?? "Results over time"}
+                    ? "Searching artworks…"
+                    : "Searching the catalogue…"
+                  : resultsTitle}
               </h2>
               {!loading && yearRange && <span>{yearRange}</span>}
             </div>
-            {result && !loading && <p>{result.queries.length} series · {result.corpus.label}</p>}
+            {result && !loading && (
+              <p>
+                {result.queries.length} {result.queries.length === 1 ? "term" : "terms"} · The Met public-domain collection
+              </p>
+            )}
           </div>
 
           {errorPlacement === "empty" && (
@@ -500,9 +519,7 @@ export default function Home() {
             </div>
           )}
           {loading && submittedSearchMode === "embedding" && (
-            <p className="cold-start-note">
-              Visual searches run on demand. The first request after an idle period may take longer while the service warms up.
-            </p>
+            <p className="cold-start-note">A new visual search can take a moment.</p>
           )}
           {loading && <div className="chart-skeleton" />}
           {!loading && result && result.bins.length > 0 && hasChartPoints && (
@@ -511,6 +528,8 @@ export default function Home() {
               series={result.series}
               queries={result.queries}
               metric={result.metric}
+              label={resultsTitle}
+              description={CHART_HELP[submittedSearchMode]}
               selection={selection}
               hiddenQueryIds={hiddenQueryIds}
               onSelect={(nextSelection) => void loadEvidence(nextSelection)}
@@ -525,35 +544,63 @@ export default function Home() {
             <div className="message-state">
               {submittedSearchMode === "keyword"
                 ? "No dated artworks matched these metadata keywords."
-                : "No dated visual matches passed the score cutoff. Empty periods mean insufficient evidence, not zero historical prevalence."}
+                : allTermsUnmatched && nearestGroups.length
+                  ? "None of the search terms produced a strong visual match. The closest artworks are shown below."
+                  : "No strong visual matches were found in the dated collection."}
             </div>
           )}
         </section>
 
-        <section className="evidence" aria-label="Evidence for the selected chart point">
+        {!loading && !error && nearestGroups.length > 0 && (
+          <section className="nearest-results" aria-labelledby="nearest-results-heading" aria-live="polite">
+            <div className="evidence-heading">
+              <h2 id="nearest-results-heading">Closest visual results</h2>
+              <p>Below the strong-match cutoff</p>
+            </div>
+            <p className="nearest-results-note">
+              These are the most visually similar artworks the search found, but none met the cutoff for timeline evidence.
+            </p>
+            {nearestGroups.map(({ query, artworks }) => (
+              <div className="nearest-result-group" key={query.id}>
+                <div className="nearest-result-heading">
+                  <h3>No strong visual matches for “{query.label}”</h3>
+                  <p>Showing {artworks.length} closest work{artworks.length === 1 ? "" : "s"}</p>
+                </div>
+                <div className="artwork-grid">
+                  {artworks.map((artwork) => (
+                    <ArtworkCard key={artwork.artworkId} artwork={artwork} />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </section>
+        )}
+
+        {(hasChartPoints || !nearestGroups.length) && (
+          <section className="evidence" aria-label="Artworks for the selected chart point">
           <div className="evidence-heading">
             <h2>
               {!selection || !selectedQuery || !selectedBin
-                ? "Select a line and period"
+                ? "Select a point on the chart to see artworks"
                 : `${selectedQuery.label} · ${selectedBin.label}`}
             </h2>
             {selectedPoint && submittedSearchMode === "keyword" && (
-              <p>{selectedPoint.objectCount} contributing work{selectedPoint.objectCount === 1 ? "" : "s"}</p>
+              <p>{selectedPoint.objectCount} matching work{selectedPoint.objectCount === 1 ? "" : "s"}</p>
             )}
             {selectedPoint && submittedSearchMode !== "keyword" && (
               <p>
                 {evidenceLoading
-                  ? "Loading visual matches…"
+                  ? "Loading artworks…"
                   : evidenceError
-                    ? "Evidence unavailable"
-                    : `${selectedEvidence?.contributorCount ?? 0} visual match${(selectedEvidence?.contributorCount ?? 0) === 1 ? "" : "es"}`}
+                    ? "Artworks unavailable"
+                    : `${selectedEvidence?.contributorCount ?? 0} matching work${(selectedEvidence?.contributorCount ?? 0) === 1 ? "" : "s"}`}
               </p>
             )}
           </div>
 
           {evidenceError && <p className="evidence-error" role="alert">{evidenceError}</p>}
           <div className="artwork-grid" aria-busy={evidenceLoading}>
-            {evidenceLoading && <p className="no-works">Loading evidence…</p>}
+            {evidenceLoading && <p className="no-works">Loading artworks…</p>}
             {!evidenceLoading && visibleItems.map((artwork) => (
               <ArtworkCard key={artwork.artworkId} artwork={artwork} />
             ))}
@@ -561,7 +608,7 @@ export default function Home() {
               <p className="no-works">
                 {submittedSearchMode === "keyword"
                   ? "No keyword matches in this period."
-                  : "No visual matches passed the score cutoff in this period."}
+                  : "No strong visual matches in this period."}
               </p>
             )}
           </div>
@@ -573,11 +620,16 @@ export default function Home() {
               onClick={() => setShowAllExamples((current) => !current)}
             >
               {showAllExamples
-                ? "Show fewer matches"
-                : `Show ${hiddenExampleCount} more match${hiddenExampleCount === 1 ? "" : "es"}`}
+                ? "Show fewer works"
+                : `Show ${hiddenExampleCount} more work${hiddenExampleCount === 1 ? "" : "s"}`}
             </button>
           )}
-        </section>
+          </section>
+        )}
+
+        <footer className="source-footer">
+          Public-domain artwork images and catalogue data from The Metropolitan Museum of Art Open Access collection.
+        </footer>
       </div>
     </main>
   );

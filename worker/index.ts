@@ -5,7 +5,6 @@ import {
 } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { serveCatalogAsset } from "../lib/static-release";
-import { checkVisualRateLimit } from "../lib/visual-rate-limit";
 import { handleMetServiceRequest, type D1Database } from "./met-search";
 
 interface Env {
@@ -29,8 +28,6 @@ interface ExecutionContext {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    const rateLimitResponse = await checkVisualRateLimit(request, env.DB);
-    if (rateLimitResponse) return rateLimitResponse;
     const releaseAsset = await serveCatalogAsset(
       request,
       env.ASSETS.fetch.bind(env.ASSETS),

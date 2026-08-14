@@ -100,6 +100,14 @@ function rewriteBackendImageUrls(payload: unknown, searchMode: SearchMode) {
       for (const items of Object.values(slices)) rewriteItems(items);
     }
   }
+
+  const series = (payload as { series?: unknown }).series;
+  if (Array.isArray(series)) {
+    for (const item of series) {
+      if (!item || typeof item !== "object") continue;
+      rewriteItems((item as { nearestMatches?: unknown }).nearestMatches);
+    }
+  }
   return payload;
 }
 

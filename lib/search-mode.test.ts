@@ -17,7 +17,7 @@ import {
 } from "./search-mode.ts";
 
 test("keeps exactly the keyword and embedding mode values", () => {
-  assert.deepEqual(SEARCH_MODES, ["keyword", "embedding"]);
+  assert.deepEqual(SEARCH_MODES, ["embedding", "keyword"]);
   assert.equal(DEFAULT_SEARCH_MODE, "embedding");
   assert.equal(searchModeFromUrl(null), "embedding");
   assert.equal(searchModeFromUrl("unknown"), "embedding");
@@ -25,7 +25,10 @@ test("keeps exactly the keyword and embedding mode values", () => {
   assert.equal(searchModeFromUrl("embedding"), "embedding");
   assert.equal(searchModeFromUrl("siglip"), "embedding");
   assert.equal(isSearchMode("semantic"), false);
-  assert.deepEqual(SEARCH_MODE_LABELS, { keyword: "Metadata", embedding: "Visual" });
+  assert.deepEqual(SEARCH_MODE_LABELS, {
+    keyword: "Metadata search",
+    embedding: "Visual search",
+  });
 });
 
 test("builds mode-specific search and evidence requests", () => {
