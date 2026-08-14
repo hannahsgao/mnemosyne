@@ -35,18 +35,34 @@ import type {
   SelectedEvidence,
 } from "../lib/types";
 
-const INITIAL_QUERY = "Horse, Ship";
-const EXAMPLE_QUERIES = [
-  "horse, ship, flowers",
-  "religious procession",
-  "woman holding a lantern",
-  "blue-and-white porcelain",
-  "ceremonial bronze vessel",
+type ExampleQuery = Readonly<{
+  label: string;
+  query: string;
+}>;
+
+const INITIAL_QUERY = "ship, harbor, bridge";
+const EXAMPLE_QUERIES: readonly ExampleQuery[] = [
+  { label: "Self-image", query: "mirror, portrait, self-portrait" },
+  { label: "The modern interior", query: "clock, chair, table, lamp" },
+  { label: "A connected world", query: "ship, harbor, bridge" },
+  { label: "From icon to individual", query: "mother and child, portrait, self-portrait" },
+  { label: "Power & fashion", query: "crown, bonnet, top hat, bowler hat" },
 ];
-const METADATA_EXAMPLE_QUERIES = [
-  "industry, machine, skyscraper",
-  "portrait, mother and child",
-  "armor, sword, crown",
+const METADATA_EXAMPLE_QUERIES: readonly ExampleQuery[] = [
+  {
+    label: "Printmaking's relay race",
+    query: "woodcut, engraving, etching, lithograph, screenprint",
+  },
+  {
+    label: "Photography's family tree",
+    query: "daguerreotype, albumen silver print, gelatin silver print, chromogenic print, inkjet print",
+  },
+  {
+    label: "From manuscript to mass media",
+    query: "manuscript, printed book, newspaper",
+  },
+  { label: "From bronze to plastic", query: "bronze, marble, porcelain, plastic" },
+  { label: "Modernity in motion", query: "carriage, automobile, airplane" },
 ];
 const INITIAL_VISIBLE_WORKS = 5;
 
@@ -56,8 +72,8 @@ const SEARCH_INPUT_LABELS: Record<SearchMode, string> = {
 };
 
 const SEARCH_PLACEHOLDERS: Record<SearchMode, string> = {
-  embedding: "horse, religious procession, woman holding a lantern",
-  keyword: "industry, machine, skyscraper",
+  embedding: "mirror, portrait, self-portrait",
+  keyword: "carriage, automobile, airplane",
 };
 
 const SEARCH_MODE_TITLES: Record<SearchMode, string> = {
@@ -469,7 +485,14 @@ export default function Home() {
             <div className="query-row" id="query-help">
               <span>Try:</span>
               {exampleQueries.map((example) => (
-                <button key={example} type="button" onClick={() => void search(example, searchMode)}>{example}</button>
+                <button
+                  key={example.query}
+                  type="button"
+                  title={example.query}
+                  onClick={() => void search(example.query, searchMode)}
+                >
+                  {example.label}
+                </button>
               ))}
             </div>
 
