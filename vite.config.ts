@@ -11,16 +11,6 @@ const localBindingConfig = {
   cache: {
     enabled: true,
   },
-  ratelimits: [
-    {
-      name: "VISUAL_RATE_LIMITER",
-      namespace_id: "67572026",
-      simple: {
-        limit: 20,
-        period: 60 as const,
-      },
-    },
-  ],
   assets: {
     binding: "ASSETS",
   },

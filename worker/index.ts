@@ -7,14 +7,12 @@ import handler from "vinext/server/app-router-entry";
 import { serveCatalogAsset } from "../lib/static-release";
 import {
   checkVisualRateLimit,
-  type RateLimitBinding,
 } from "../lib/visual-rate-limit";
 import { handleMetServiceRequest, type D1Database } from "./met-search";
 
 interface Env {
   ASSETS: { fetch(request: Request): Promise<Response> };
   DB: D1Database;
-  VISUAL_RATE_LIMITER?: RateLimitBinding;
   MNEMOSYNE_IMPORT_TOKEN?: string;
   IMAGES: {
     input(stream: ReadableStream): {
@@ -35,7 +33,7 @@ const worker = {
     const url = new URL(request.url);
     const rateLimitResponse = await checkVisualRateLimit(
       request,
-      env.VISUAL_RATE_LIMITER,
+      env.DB,
     );
     if (rateLimitResponse) return rateLimitResponse;
     const releaseAsset = await serveCatalogAsset(
