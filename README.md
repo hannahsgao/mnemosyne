@@ -267,9 +267,11 @@ The outer Visual API responses emit the exact shared-cache policy
 confirm that the Sites/Cloudflare deployment caches dynamic API responses by
 checking `CF-Cache-Status` twice for the same Visual URL and enable Workers
 caching or a narrow `/api/search` and `/api/evidence` cache rule if necessary.
-Apply a Visual-only edge rate limit of roughly 20 requests per minute per IP;
-the Python service's bounded request admission is overload protection, not an
-IP abuse limit. Keep Metadata behavior and ordinary assets outside that rule.
+The Worker enforces a Visual-only limit of 20 operations per minute per client
+IP using the attached D1 database; it stores only an application-scoped digest
+of the address, and leaves Metadata and ordinary assets outside the limit. The
+Python service's bounded request admission remains separate overload
+protection.
 
 The intended custom hostname is `mnemosyne.hannahgao.studio`. It is a separate
 subdomain: the portfolio Worker and DNS route for `hannahgao.studio` must not be
