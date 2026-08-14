@@ -35,13 +35,17 @@ import type {
   SelectedEvidence,
 } from "../lib/types";
 
-const INITIAL_QUERY = "ship, harbor, bridge";
+const INITIAL_QUERY = "manuscript page, newspaper, comic strip";
 const EXAMPLE_QUERIES = [
   "mirror, portrait, self-portrait",
   "clock, chair, table, lamp",
-  "ship, harbor, bridge",
-  "mother and child, portrait, self-portrait",
   "crown, bonnet, top hat, bowler hat",
+  "manuscript page, newspaper, comic strip",
+  "crucifixion, public execution",
+  "sailing ship, steamship",
+  "palace interior, church interior, domestic interior, factory interior",
+  "Last Supper, banquet, tea party, café",
+  "powdered wig, bonnet, crinoline dress, flapper dress",
 ];
 const METADATA_EXAMPLE_QUERIES = [
   "woodcut, engraving, etching, lithograph, screenprint",
