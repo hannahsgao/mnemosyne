@@ -169,6 +169,14 @@ test("D1 evidence route omits timeline aggregation and preserves keyword slices"
     payload.selectedEvidence.slices.randomContributors,
   );
   assert.equal(payload.selectedEvidence.slices.strongest[0].artworkId, "MET_10");
+  assert.equal(
+    fixture.queries.some((query) => query.includes("AS contribution_weight")),
+    true,
+  );
+  assert.equal(
+    fixture.queries.some((query) => query.includes("FROM met_object_cache")),
+    true,
+  );
   assert.equal(fixture.queries.some((query) => query.includes("SUM(")), false);
   assert.equal(
     fixture.queries.some((query) => query.includes("COUNT(*) AS total")),
@@ -176,7 +184,7 @@ test("D1 evidence route omits timeline aggregation and preserves keyword slices"
   );
 });
 
-test("D1 search route retains the full response and compatible evidence slices", async () => {
+test("D1 search route returns the timeline without querying or hydrating evidence", async () => {
   const fixture = new FixtureDatabase();
   const request = new Request("https://mnemosyne.example/v1/search", {
     method: "POST",
@@ -195,9 +203,14 @@ test("D1 search route retains the full response and compatible evidence slices",
   assert.equal(payload.schemaVersion, "mnemosyne.search.v1");
   assert.equal(payload.bins.length, 1);
   assert.equal(payload.series.length, 1);
-  assert.deepEqual(
-    payload.selectedEvidence.slices.strongest,
-    payload.selectedEvidence.slices.randomContributors,
+  assert.equal(payload.selectedEvidence, null);
+  assert.equal(
+    fixture.queries.some((query) => query.includes("AS contribution_weight")),
+    false,
+  );
+  assert.equal(
+    fixture.queries.some((query) => query.includes("FROM met_object_cache")),
+    false,
   );
 });
 

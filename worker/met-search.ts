@@ -505,13 +505,9 @@ async function handleSearch(request: Request, db: D1Database) {
     }>();
     const aggregates = await Promise.all(terms.map((term) => aggregateTerm(db, term, bins)));
     const selectedIndex = selectedTermIndex(payload, terms);
-    const binIndex = selectedBinIndex(payload.selectedBinKey, bins, aggregates[selectedIndex].points);
-    const cards = await evidence(
-      db,
-      terms[selectedIndex],
-      aggregates[selectedIndex].expression,
-      bins[binIndex],
-    );
+    // Preserve selection validation while keeping remote artwork hydration off
+    // the chart's critical path. The client loads cards through /v1/evidence.
+    selectedBinIndex(payload.selectedBinKey, bins, aggregates[selectedIndex].points);
     const warnings: string[] = [];
     const sparseCount = bins.filter((bin) => bin.denominator < MINIMUM_DENOMINATOR).length;
     if (sparseCount) {
@@ -570,11 +566,7 @@ async function handleSearch(request: Request, db: D1Database) {
         points: aggregates[index].points,
         totalMatches: aggregates[index].totalMatches,
       })),
-      selectedEvidence: selectedEvidencePayload(
-        terms[selectedIndex],
-        bins[binIndex],
-        cards,
-      ),
+      selectedEvidence: null,
       warnings,
       generatedAt: new Date().toISOString(),
     });
