@@ -48,11 +48,11 @@ const EXAMPLE_QUERIES = [
   "powdered wig, bonnet, crinoline dress, flapper dress",
 ];
 const METADATA_EXAMPLE_QUERIES = [
-  "woodcut, engraving, etching, lithograph, screenprint",
-  "daguerreotype, albumen silver print, gelatin silver print, chromogenic print, inkjet print",
   "manuscript, printed book, newspaper",
   "bronze, marble, porcelain, plastic",
   "carriage, automobile, airplane",
+  "venice, paris, new york, los angeles",
+  "chariot, carriage, train, airplane",
 ];
 const INITIAL_VISIBLE_WORKS = 5;
 
