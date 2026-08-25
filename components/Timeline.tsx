@@ -11,6 +11,7 @@ import {
 } from "react";
 import type {
   ChartSelection,
+  CorpusMetadata,
   MetricMetadata,
   QueryDescriptor,
   SearchSeries,
@@ -31,6 +32,7 @@ type TimelineProps = {
   series: SearchSeries[];
   queries: QueryDescriptor[];
   metric: MetricMetadata;
+  countingUnit: CorpusMetadata["countingUnit"];
   label?: string;
   description?: string;
   selection: ChartSelection | null;
@@ -168,6 +170,7 @@ export function Timeline({
   series,
   queries,
   metric,
+  countingUnit,
   label = metric.label,
   description = metric.description,
   selection,
@@ -848,7 +851,7 @@ export function Timeline({
             <rect width="184" height="48" rx="5" />
             <text x="10" y="17">{hoverPlot.query.label}</text>
             <text className="tooltip-value" x="10" y="34">
-              {hoverBin.label} · {formatValue(hoverPoint.value, metric)} · {hoverPoint.objectCount} works
+              {hoverBin.label} · {formatValue(hoverPoint.value, metric)} · {hoverPoint.objectCount} {countingUnit === "catalog-record" ? `catalog record${hoverPoint.objectCount === 1 ? "" : "s"}` : `work${hoverPoint.objectCount === 1 ? "" : "s"}`}
             </text>
           </g>
         )}

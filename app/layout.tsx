@@ -4,7 +4,7 @@ import "./globals.css";
 
 const TITLE = "Mnemosyne — Trace visual ideas through art history";
 const DESCRIPTION =
-  "Search The Met’s public-domain collection by metadata or any visual idea, then trace results through time and inspect the artworks behind every signal.";
+  "Search open-access museum collections by metadata or any visual idea, then trace results through time and inspect the artworks behind every signal.";
 const FALLBACK_ORIGIN = "https://mnemosyne.hannahgao.studio";
 
 function requestOrigin(requestHeaders: Pick<Headers, "get">) {

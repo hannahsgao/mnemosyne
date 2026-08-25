@@ -30,6 +30,7 @@ import {
 import { formatTimelineYear, peakSelection, pointForBin, timelineWindow } from "../lib/timeline";
 import type {
   ChartSelection,
+  CorpusMetadata,
   EvidenceArtwork,
   SearchResponse,
   SelectedEvidence,
@@ -126,6 +127,41 @@ function errorMessage(payload: unknown, fallback: string) {
     : fallback;
 }
 
+function institutionLabel(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "met" || normalized === "the met") return "The Met";
+  if (normalized === "nga" || normalized === "national gallery of art") {
+    return "National Gallery of Art";
+  }
+  if (normalized === "aic" || normalized === "art institute of chicago") {
+    return "Art Institute of Chicago";
+  }
+  return value || "Museum source unavailable";
+}
+
+function itemNoun(count: number, countingUnit: CorpusMetadata["countingUnit"]) {
+  if (countingUnit === "catalog-record") {
+    return `catalog record${count === 1 ? "" : "s"}`;
+  }
+  return `work${count === 1 ? "" : "s"}`;
+}
+
+function matchingItemLabel(
+  count: number,
+  countingUnit: CorpusMetadata["countingUnit"],
+) {
+  return `${count} matching ${itemNoun(count, countingUnit)}`;
+}
+
+function corpusSummary(corpus: CorpusMetadata) {
+  const label = corpus.label === corpus.id
+    ? "Open-access museum image catalog"
+    : corpus.label;
+  return corpus.count === null
+    ? label
+    : `${corpus.count.toLocaleString()} ${itemNoun(corpus.count, corpus.countingUnit)} · ${label}`;
+}
+
 function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
   return (
     <a className="artwork-card" href={artwork.sourceRecordUrl} target="_blank" rel="noreferrer">
@@ -140,6 +176,7 @@ function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
       <div className="artwork-copy">
         <strong title={artwork.title || "Untitled"}>{artwork.title || "Untitled"}</strong>
         <span title={artwork.artist}>{artwork.artist || "Unknown artist"}</span>
+        <em title={institutionLabel(artwork.institution)}>{institutionLabel(artwork.institution)}</em>
         <small>{artwork.dateDisplay} ↗</small>
       </div>
     </a>
@@ -449,7 +486,7 @@ export default function Home() {
       </header>
 
       <div className="workspace">
-        <section className="search-area" aria-label="Search The Met collection">
+        <section className="search-area" aria-label="Search museum collections">
           <div className="search-controls">
             <div className="search-toolbar">
               <span className="search-mode-toggle" role="group" aria-label="Search method">
@@ -512,7 +549,7 @@ export default function Home() {
             </div>
             {result && !loading && (
               <p>
-                {result.queries.length} {result.queries.length === 1 ? "term" : "terms"} · The Met public-domain collection
+                {result.queries.length} {result.queries.length === 1 ? "term" : "terms"} · {corpusSummary(result.corpus)}
               </p>
             )}
           </div>
@@ -532,6 +569,7 @@ export default function Home() {
               series={result.series}
               queries={result.queries}
               metric={result.metric}
+              countingUnit={result.corpus.countingUnit}
               label={resultsTitle}
               description={CHART_HELP[submittedSearchMode]}
               selection={selection}
@@ -568,7 +606,7 @@ export default function Home() {
               <div className="nearest-result-group" key={query.id}>
                 <div className="nearest-result-heading">
                   <h3>No strong visual matches for “{query.label}”</h3>
-                  <p>Showing {artworks.length} closest work{artworks.length === 1 ? "" : "s"}</p>
+                  <p>Showing {artworks.length} closest result{artworks.length === 1 ? "" : "s"}</p>
                 </div>
                 <div className="artwork-grid">
                   {artworks.map((artwork) => (
@@ -589,7 +627,7 @@ export default function Home() {
                 : `${selectedQuery.label} · ${selectedBin.label}`}
             </h2>
             {selectedPoint && submittedSearchMode === "keyword" && (
-              <p>{selectedPoint.objectCount} matching work{selectedPoint.objectCount === 1 ? "" : "s"}</p>
+              <p>{matchingItemLabel(selectedPoint.objectCount, result!.corpus.countingUnit)}</p>
             )}
             {selectedPoint && submittedSearchMode !== "keyword" && (
               <p>
@@ -597,7 +635,7 @@ export default function Home() {
                   ? "Loading artworks…"
                   : evidenceError
                     ? "Artworks unavailable"
-                    : `${selectedEvidence?.contributorCount ?? 0} matching work${(selectedEvidence?.contributorCount ?? 0) === 1 ? "" : "s"}`}
+                    : matchingItemLabel(selectedEvidence?.contributorCount ?? 0, result!.corpus.countingUnit)}
               </p>
             )}
           </div>
@@ -624,15 +662,17 @@ export default function Home() {
               onClick={() => setShowAllExamples((current) => !current)}
             >
               {showAllExamples
-                ? "Show fewer works"
-                : `Show ${hiddenExampleCount} more work${hiddenExampleCount === 1 ? "" : "s"}`}
+                ? `Show fewer ${itemNoun(2, result!.corpus.countingUnit)}`
+                : `Show ${hiddenExampleCount} more ${itemNoun(hiddenExampleCount, result!.corpus.countingUnit)}`}
             </button>
           )}
           </section>
         )}
 
         <footer className="source-footer">
-          Public-domain artwork images and catalogue data from The Metropolitan Museum of Art Open Access collection.
+          {submittedSearchMode === "embedding"
+            ? "Visual search uses public-domain artwork images and CC0 catalog data from The Metropolitan Museum of Art and the National Gallery of Art."
+            : "Metadata search uses catalog data from The Metropolitan Museum of Art Open Access collection."}
         </footer>
       </div>
     </main>
