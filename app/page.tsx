@@ -9,7 +9,11 @@ import {
   useState,
 } from "react";
 import { Timeline, type TimelineHoverPreview } from "../components/Timeline";
-import { nearestMatchGroups, selectedEvidenceItems } from "../lib/evidence";
+import {
+  evidencePreviewLabel,
+  nearestMatchGroups,
+  selectedEvidenceItems,
+} from "../lib/evidence";
 import {
   evidenceMatchesSelection,
   invalidSearchStatus,
@@ -189,13 +193,6 @@ function itemNoun(count: number, countingUnit: CorpusMetadata["countingUnit"]) {
     return `catalog record${count === 1 ? "" : "s"}`;
   }
   return `work${count === 1 ? "" : "s"}`;
-}
-
-function matchingItemLabel(
-  count: number,
-  countingUnit: CorpusMetadata["countingUnit"],
-) {
-  return `${count} matching ${itemNoun(count, countingUnit)}`;
 }
 
 function corpusSummary(corpus: CorpusMetadata) {
@@ -596,12 +593,6 @@ export default function Home() {
   const selectedBin = result?.bins.find((bin) => bin.key === selection?.binKey) ?? null;
   const selectedSeries = result?.series.find((series) => series.queryId === selection?.queryId) ?? null;
   const selectedPoint = selectedSeries && selection ? pointForBin(selectedSeries, selection.binKey) : null;
-  const currentEvidence = result?.selectedEvidence ?? null;
-  const selectedEvidence = currentEvidence &&
-    currentEvidence.queryId === selection?.queryId &&
-    currentEvidence.binKey === selection?.binKey
-    ? currentEvidence
-    : null;
   const displayedBins = result?.bins.length ? timelineWindow(result.bins) : [];
   const hasChartPoints = result?.series.some((series) => series.points.length > 0) ?? false;
   const allTermsUnmatched = Boolean(
@@ -802,16 +793,18 @@ export default function Home() {
                 ? "Select a point on the chart to see artworks"
                 : `${selectedQuery.label} · ${selectedBin.label}`}
             </h2>
-            {selectedPoint && submittedSearchMode === "keyword" && (
-              <p>{matchingItemLabel(selectedPoint.objectCount, result!.corpus.countingUnit)}</p>
-            )}
-            {selectedPoint && submittedSearchMode !== "keyword" && (
+            {selectedPoint && (
               <p>
                 {evidenceLoading
                   ? "Loading artworks…"
                   : evidenceError
                     ? "Artworks unavailable"
-                    : matchingItemLabel(selectedEvidence?.contributorCount ?? 0, result!.corpus.countingUnit)}
+                    : evidencePreviewLabel(
+                        visibleItems.length,
+                        evidenceItems.length,
+                        selectedPoint.objectCount,
+                        result!.corpus.countingUnit,
+                      )}
               </p>
             )}
           </div>
@@ -840,8 +833,8 @@ export default function Home() {
               onClick={() => setShowAllExamples((current) => !current)}
             >
               {showAllExamples
-                ? `Show fewer ${itemNoun(2, result!.corpus.countingUnit)}`
-                : `Show ${hiddenExampleCount} more ${itemNoun(hiddenExampleCount, result!.corpus.countingUnit)}`}
+                ? "Show fewer preview cards"
+                : `Show ${hiddenExampleCount} more preview card${hiddenExampleCount === 1 ? "" : "s"}`}
             </button>
           )}
           </section>
