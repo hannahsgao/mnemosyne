@@ -37,7 +37,7 @@ export async function generateMetadata(): Promise<Metadata> {
         url: socialImage,
         width: 1731,
         height: 909,
-        alt: "Mnemosyne visual-search timeline with archival art imagery",
+        alt: "A white line-art horse with a looping mane on cobalt blue",
       }],
     },
     twitter: {
