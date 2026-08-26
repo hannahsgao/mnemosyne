@@ -2,12 +2,13 @@
 
 import {
   type FormEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { Timeline } from "../components/Timeline";
+import { Timeline, type TimelineHoverPreview } from "../components/Timeline";
 import { nearestMatchGroups, selectedEvidenceItems } from "../lib/evidence";
 import {
   evidenceMatchesSelection,
@@ -16,6 +17,7 @@ import {
   prepareEvidenceRequest,
   searchErrorPlacement,
 } from "../lib/explorer-state";
+import { sampleHoverArtwork } from "../lib/hover-preview";
 import { MAX_QUERY_LENGTH, parseConceptQuery, QuerySyntaxError } from "../lib/query";
 import { requestKeywordEvidence, requestKeywordSearch } from "../lib/keyword-transport";
 import { requestVisualEvidence, requestVisualSearch } from "../lib/visual-transport";
@@ -56,6 +58,49 @@ const METADATA_EXAMPLE_QUERIES = [
   "chariot, carriage, train, airplane",
 ];
 const INITIAL_VISIBLE_WORKS = 5;
+const HOVER_PREVIEW_DELAY_MS = 75;
+const HOVER_PREVIEW_CACHE_LIMIT = 80;
+
+function hoverPreviewCacheKey(
+  query: string,
+  mode: SearchMode,
+  selection: ChartSelection,
+) {
+  return `${mode}\u0000${query}\u0000${selection.queryId}\u0000${selection.binKey}`;
+}
+
+function writeHoverPreviewCache(
+  cache: Map<string, EvidenceArtwork | null>,
+  key: string,
+  artwork: EvidenceArtwork | null,
+) {
+  cache.delete(key);
+  cache.set(key, artwork);
+  while (cache.size > HOVER_PREVIEW_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+function cacheSelectedEvidencePreview(
+  cache: Map<string, EvidenceArtwork | null>,
+  failedArtworkIds: Map<string, Set<string>>,
+  query: string,
+  mode: SearchMode,
+  evidence: SelectedEvidence | null,
+) {
+  if (!evidence) return;
+  const selection = { queryId: evidence.queryId, binKey: evidence.binKey };
+  const key = hoverPreviewCacheKey(query, mode, selection);
+  if (!cache.has(key)) {
+    writeHoverPreviewCache(
+      cache,
+      key,
+      sampleHoverArtwork(evidence, failedArtworkIds.get(key)),
+    );
+  }
+}
 
 const SEARCH_INPUT_LABELS: Record<SearchMode, string> = {
   embedding: "Search artworks by visual content",
@@ -219,12 +264,110 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [showAllExamples, setShowAllExamples] = useState(false);
+  const [hoverPreview, setHoverPreview] = useState<TimelineHoverPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const requestId = useRef(0);
   const evidenceRequestId = useRef(0);
+  const hoverPreviewRequestId = useRef(0);
   const searchAbort = useRef<AbortController | null>(null);
   const evidenceAbort = useRef<AbortController | null>(null);
+  const hoverPreviewAbort = useRef<AbortController | null>(null);
+  const hoverPreviewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hoverPreviewCache = useRef(new Map<string, EvidenceArtwork | null>());
+  const failedHoverArtworkIds = useRef(new Map<string, Set<string>>());
+
+  function resetHoverPreview(clearCache = false) {
+    hoverPreviewRequestId.current += 1;
+    if (hoverPreviewTimer.current !== null) {
+      clearTimeout(hoverPreviewTimer.current);
+      hoverPreviewTimer.current = null;
+    }
+    hoverPreviewAbort.current?.abort();
+    hoverPreviewAbort.current = null;
+    setHoverPreview(null);
+    if (clearCache) {
+      hoverPreviewCache.current.clear();
+      failedHoverArtworkIds.current.clear();
+    }
+  }
+
+  const handleHoverSelection = useCallback((nextSelection: ChartSelection | null) => {
+    const currentRequest = ++hoverPreviewRequestId.current;
+    if (hoverPreviewTimer.current !== null) {
+      clearTimeout(hoverPreviewTimer.current);
+      hoverPreviewTimer.current = null;
+    }
+    hoverPreviewAbort.current?.abort();
+    hoverPreviewAbort.current = null;
+    setHoverPreview(null);
+    if (!nextSelection) return;
+
+    const key = hoverPreviewCacheKey(submittedQuery, submittedSearchMode, nextSelection);
+    const cache = hoverPreviewCache.current;
+    if (cache.has(key)) {
+      const artwork = cache.get(key) ?? null;
+      cache.delete(key);
+      cache.set(key, artwork);
+      if (artwork) setHoverPreview({ selection: nextSelection, artwork });
+      return;
+    }
+
+    hoverPreviewTimer.current = setTimeout(() => {
+      hoverPreviewTimer.current = null;
+      const controller = new AbortController();
+      hoverPreviewAbort.current = controller;
+      void (async () => {
+        try {
+          const { response, payload } = submittedSearchMode === "keyword"
+            ? await requestKeywordEvidence(submittedQuery, nextSelection, {
+                signal: controller.signal,
+              })
+            : await requestVisualEvidence(submittedQuery, nextSelection, {
+                signal: controller.signal,
+              });
+          if (!response.ok || !isEvidenceEnvelope(payload)) return;
+          if (hoverPreviewRequestId.current !== currentRequest) return;
+          const evidence = payload.selectedEvidence;
+          const artwork = evidenceMatchesSelection(evidence, nextSelection)
+            ? sampleHoverArtwork(evidence, failedHoverArtworkIds.current.get(key))
+            : null;
+          writeHoverPreviewCache(cache, key, artwork);
+          if (artwork) setHoverPreview({ selection: nextSelection, artwork });
+        } catch {
+          // Image failures are decorative; the chart caption remains available.
+        } finally {
+          if (hoverPreviewAbort.current === controller) hoverPreviewAbort.current = null;
+        }
+      })();
+    }, HOVER_PREVIEW_DELAY_MS);
+  }, [submittedQuery, submittedSearchMode]);
+
+  const handleHoverPreviewError = useCallback((failedPreview: TimelineHoverPreview) => {
+    const key = hoverPreviewCacheKey(
+      submittedQuery,
+      submittedSearchMode,
+      failedPreview.selection,
+    );
+    const failures = failedHoverArtworkIds.current;
+    const artworkIds = failures.get(key) ?? new Set<string>();
+    artworkIds.add(failedPreview.artwork.artworkId);
+    failures.delete(key);
+    failures.set(key, artworkIds);
+    while (failures.size > HOVER_PREVIEW_CACHE_LIMIT) {
+      const oldest = failures.keys().next().value;
+      if (oldest === undefined) break;
+      failures.delete(oldest);
+    }
+    hoverPreviewCache.current.delete(key);
+    setHoverPreview((current) =>
+      current?.selection.queryId === failedPreview.selection.queryId &&
+      current.selection.binKey === failedPreview.selection.binKey &&
+      current.artwork.artworkId === failedPreview.artwork.artworkId
+        ? null
+        : current,
+    );
+  }, [submittedQuery, submittedSearchMode]);
 
   function replacePageState(query: string, mode: SearchMode, nextSelection: ChartSelection | null) {
     const nextUrl = pageUrlForSearchState(window.location.href, {
@@ -266,6 +409,7 @@ export default function Home() {
     }
 
     const trimmedQuery = nextQuery.trim();
+    resetHoverPreview(true);
     const controller = new AbortController();
     searchAbort.current = controller;
     replacePageState(trimmedQuery, nextMode, null);
@@ -316,6 +460,13 @@ export default function Home() {
         payload.selectedEvidence
           ? { queryId: payload.selectedEvidence.queryId, binKey: payload.selectedEvidence.binKey }
           : peakSelection(payload)
+      );
+      cacheSelectedEvidencePreview(
+        hoverPreviewCache.current,
+        failedHoverArtworkIds.current,
+        trimmedQuery,
+        nextMode,
+        payload.selectedEvidence,
       );
       setResult(payload);
       setSelection(nextSelection);
@@ -398,6 +549,13 @@ export default function Home() {
         selectedEvidence = payload.selectedEvidence;
       }
       if (evidenceRequestId.current !== currentRequest) return;
+      cacheSelectedEvidencePreview(
+        hoverPreviewCache.current,
+        failedHoverArtworkIds.current,
+        activeQuery,
+        activeMode,
+        selectedEvidence,
+      );
       setResult((current) => current ? { ...current, selectedEvidence } : current);
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") return;
@@ -416,6 +574,9 @@ export default function Home() {
     return () => {
       searchAbort.current?.abort();
       evidenceAbort.current?.abort();
+      hoverPreviewRequestId.current += 1;
+      if (hoverPreviewTimer.current !== null) clearTimeout(hoverPreviewTimer.current);
+      hoverPreviewAbort.current?.abort();
     };
     // Initial state comes from the shareable URL; subsequent searches are user-driven.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -586,9 +747,12 @@ export default function Home() {
               description={CHART_HELP[submittedSearchMode]}
               selection={selection}
               hiddenQueryIds={hiddenQueryIds}
+              hoverPreview={hoverPreview}
               onSelect={(nextSelection) => void loadEvidence(nextSelection)}
               onActivateSeries={activateSeries}
               onToggleSeries={toggleSeries}
+              onHoverSelection={handleHoverSelection}
+              onHoverPreviewError={handleHoverPreviewError}
             />
           )}
           {!loading && !error && result && !result.bins.length && (

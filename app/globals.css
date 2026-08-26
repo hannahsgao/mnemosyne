@@ -248,11 +248,14 @@ a { color: inherit; text-decoration: none; }
 }
 
 .timeline-wrap {
+  --preview-x: 0px;
+  --preview-y: 0px;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto auto;
   min-height: 0;
   overflow: visible;
   padding: 8px clamp(4px, 1.2vw, 16px) 8px;
+  position: relative;
 }
 
 .timeline-note {
@@ -360,10 +363,69 @@ a { color: inherit; text-decoration: none; }
   font-weight: 500;
 }
 
-.chart-tooltip { pointer-events: none; }
-.chart-tooltip rect { fill: rgba(32, 33, 36, .94); }
-.chart-tooltip text { fill: #fff; font-family: Arial, sans-serif; font-size: 11px; font-weight: 600; }
-.chart-tooltip .tooltip-value { fill: #d7d9dd; font-size: 9px; font-weight: 400; }
+.chart-hover-preview {
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  transform: translate3d(
+    calc(var(--preview-x) + 10px),
+    calc(var(--preview-y) - 100% - 10px),
+    0
+  );
+  max-width: 132px;
+  width: max-content;
+  will-change: transform;
+  z-index: 3;
+}
+.timeline-wrap[data-preview-horizontal="left"] .chart-hover-preview {
+  transform: translate3d(
+    calc(var(--preview-x) - 100% - 10px),
+    calc(var(--preview-y) - 100% - 10px),
+    0
+  );
+}
+.timeline-wrap[data-preview-vertical="below"] .chart-hover-preview {
+  transform: translate3d(
+    calc(var(--preview-x) + 10px),
+    calc(var(--preview-y) + 10px),
+    0
+  );
+}
+.timeline-wrap[data-preview-horizontal="left"][data-preview-vertical="below"] .chart-hover-preview {
+  transform: translate3d(
+    calc(var(--preview-x) - 100% - 10px),
+    calc(var(--preview-y) + 10px),
+    0
+  );
+}
+.chart-hover-preview-image {
+  display: none;
+}
+.chart-hover-preview-image.ready {
+  display: block;
+  height: auto;
+  max-height: 108px;
+  max-width: 132px;
+  width: auto;
+}
+.chart-hover-preview-copy {
+  align-items: baseline;
+  color: var(--ink);
+  display: flex;
+  font-size: 10px;
+  gap: 4px;
+  line-height: 1.25;
+  padding-top: 4px;
+  white-space: nowrap;
+}
+.chart-hover-preview-copy strong {
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chart-hover-preview-copy span { color: var(--muted); flex: none; }
 
 .timeline-footer {
   align-items: center;

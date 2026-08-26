@@ -12,12 +12,14 @@ import {
 import type {
   ChartSelection,
   CorpusMetadata,
+  EvidenceArtwork,
   MetricMetadata,
   QueryDescriptor,
   SearchSeries,
   SeriesPoint,
   TimeBin,
 } from "../lib/types";
+import { resolveHoverPreviewContent } from "../lib/hover-preview";
 import {
   contiguousTimelineRuns,
   dataTimelineViewport,
@@ -40,12 +42,22 @@ type TimelineProps = {
   onSelect: (selection: ChartSelection) => void;
   onActivateSeries: (queryId: string) => void;
   onToggleSeries: (queryId: string) => void;
+  hoverPreview?: TimelineHoverPreview | null;
+  onHoverSelection?: (selection: ChartSelection | null) => void;
+  onHoverPreviewError?: (preview: TimelineHoverPreview) => void;
 };
 
 type HoveredPoint = {
   queryId: string;
   binIndex: number;
+  binKey: string;
+  source: "keyboard" | "pointer";
 } | null;
+
+export type TimelineHoverPreview = {
+  selection: ChartSelection;
+  artwork: EvidenceArtwork;
+};
 
 type Viewport = {
   start: number;
@@ -178,8 +190,13 @@ export function Timeline({
   onSelect,
   onActivateSeries,
   onToggleSeries,
+  hoverPreview = null,
+  onHoverSelection,
+  onHoverPreviewError,
 }: TimelineProps) {
   const [hovered, setHovered] = useState<HoveredPoint>(null);
+  const [readyPreviewKey, setReadyPreviewKey] = useState<string | null>(null);
+  const [failedPreviewKey, setFailedPreviewKey] = useState<string | null>(null);
   const baseBins = useMemo(() => timelineWindow(bins), [bins]);
   const defaultViewport = useMemo(
     () => dataTimelineViewport(baseBins, series),
@@ -191,7 +208,10 @@ export function Timeline({
     width: DEFAULT_WIDTH,
     height: DEFAULT_HEIGHT,
   });
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<SVGSVGElement | null>(null);
+  const pointerPositionFrame = useRef<number | null>(null);
+  const queuedPointerPosition = useRef<{ clientX: number; clientY: number } | null>(null);
   const queuedViewport = useRef<Viewport | null>(null);
   const viewportFrame = useRef<number | null>(null);
   const animationFrame = useRef<number | null>(null);
@@ -210,15 +230,44 @@ export function Timeline({
     () => dataTimelineViewport(baseBins, visibleSeries),
     [baseBins, visibleSeries],
   );
+  const hoverPreviewContent = resolveHoverPreviewContent(
+    hovered ? { queryId: hovered.queryId, binKey: hovered.binKey } : null,
+    queries,
+    baseBins,
+    hovered?.source === "pointer" ? hoverPreview : null,
+  );
+  const matchingHoverPreview = hoverPreviewContent?.artwork ? hoverPreview : null;
+  const previewKey = matchingHoverPreview
+    ? `${matchingHoverPreview.selection.queryId}\u0000${matchingHoverPreview.selection.binKey}\u0000${matchingHoverPreview.artwork.artworkId}`
+    : null;
+
+  function updateHovered(next: HoveredPoint) {
+    setHovered((current) =>
+      current?.queryId === next?.queryId &&
+      current?.binKey === next?.binKey &&
+      current?.source === next?.source
+        ? current
+        : next,
+    );
+  }
 
   useEffect(() => {
     setViewport(defaultViewport);
     setHovered(null);
   }, [defaultViewport]);
 
+  useEffect(() => {
+    onHoverSelection?.(
+      hovered?.source === "pointer"
+        ? { queryId: hovered.queryId, binKey: hovered.binKey }
+        : null,
+    );
+  }, [hovered, onHoverSelection]);
+
   useEffect(() => () => {
     if (viewportFrame.current !== null) cancelAnimationFrame(viewportFrame.current);
     if (animationFrame.current !== null) cancelAnimationFrame(animationFrame.current);
+    if (pointerPositionFrame.current !== null) cancelAnimationFrame(pointerPositionFrame.current);
   }, []);
 
   useEffect(() => {
@@ -399,14 +448,14 @@ export function Timeline({
 
   function zoomBy(factor: number, anchor = 0.5, animate = false) {
     const next = zoomViewport(boundedViewport, factor, anchor, baseBins.length);
-    setHovered(null);
+    updateHovered(null);
     if (animate) animateViewport(next);
     else queueViewport(next);
   }
 
   function resetViewport() {
     animateViewport(fittedViewport);
-    setHovered(null);
+    updateHovered(null);
   }
 
   function plotGeometry(element: SVGRectElement) {
@@ -417,6 +466,52 @@ export function Timeline({
       left: bounds.left + (padLeft / viewWidth) * bounds.width,
       width: (chartWidth / viewWidth) * bounds.width,
     };
+  }
+
+  function queuePointerPosition(event: ReactPointerEvent<SVGRectElement>) {
+    if (event.pointerType === "touch") return;
+    queuedPointerPosition.current = { clientX: event.clientX, clientY: event.clientY };
+    if (pointerPositionFrame.current !== null) return;
+    pointerPositionFrame.current = requestAnimationFrame(() => {
+      pointerPositionFrame.current = null;
+      const wrapper = wrapRef.current;
+      const position = queuedPointerPosition.current;
+      queuedPointerPosition.current = null;
+      if (!wrapper || !position) return;
+      const bounds = wrapper.getBoundingClientRect();
+      const x = position.clientX - bounds.left;
+      const y = position.clientY - bounds.top;
+      positionPreview(wrapper, x, y);
+    });
+  }
+
+  function positionPreview(wrapper: HTMLDivElement, x: number, y: number) {
+    wrapper.style.setProperty("--preview-x", `${x}px`);
+    wrapper.style.setProperty("--preview-y", `${y}px`);
+    const horizontal = x < 164 ? "right" : "left";
+    const vertical = y < 154 ? "below" : "above";
+    if (wrapper.dataset.previewHorizontal !== horizontal) {
+      wrapper.dataset.previewHorizontal = horizontal;
+    }
+    if (wrapper.dataset.previewVertical !== vertical) {
+      wrapper.dataset.previewVertical = vertical;
+    }
+  }
+
+  function positionKeyboardPreview(next: Exclude<HoveredPoint, null>) {
+    const wrapper = wrapRef.current;
+    const chart = chartRef.current;
+    const bin = displayBins[next.binIndex];
+    const plot = plots.find((candidate) => candidate.item.queryId === next.queryId);
+    const point = bin && plot ? plot.pointsByBin.get(bin.key) : null;
+    if (!wrapper || !chart || !point) return;
+    const wrapperBounds = wrapper.getBoundingClientRect();
+    const chartBounds = chart.getBoundingClientRect();
+    positionPreview(
+      wrapper,
+      chartBounds.left - wrapperBounds.left + (x(next.binIndex) / viewWidth) * chartBounds.width,
+      chartBounds.top - wrapperBounds.top + (y(point.value) / viewHeight) * chartBounds.height,
+    );
   }
 
   function hoverFromPointer(event: ReactPointerEvent<SVGRectElement>): HoveredPoint {
@@ -447,7 +542,12 @@ export function Timeline({
     const closest = candidates.reduce((best, candidate) =>
       candidate.distance < best.distance ? candidate : best,
     );
-    return { queryId: closest.queryId, binIndex };
+    return {
+      queryId: closest.queryId,
+      binIndex,
+      binKey: displayBins[binIndex].key,
+      source: "pointer",
+    };
   }
 
   function handlePointerDown(event: ReactPointerEvent<SVGRectElement>) {
@@ -457,7 +557,7 @@ export function Timeline({
     stopViewportAnimation();
     event.currentTarget.setPointerCapture(event.pointerId);
     pointers.current.set(event.pointerId, event.clientX);
-    setHovered(null);
+    updateHovered(null);
     setDragging(true);
 
     if (pointers.current.size === 1) {
@@ -487,7 +587,10 @@ export function Timeline({
 
   function handlePointerMove(event: ReactPointerEvent<SVGRectElement>) {
     if (!pointers.current.has(event.pointerId)) {
-      if (!dragging) setHovered(hoverFromPointer(event));
+      if (!dragging && event.pointerType !== "touch") {
+        queuePointerPosition(event);
+        updateHovered(hoverFromPointer(event));
+      }
       return;
     }
     event.preventDefault();
@@ -554,7 +657,7 @@ export function Timeline({
 
     if (wasClick) {
       const next = hoverFromPointer(event);
-      if (next) onSelect({ queryId: next.queryId, binKey: displayBins[next.binIndex].key });
+      if (next) onSelect({ queryId: next.queryId, binKey: next.binKey });
     }
   }
 
@@ -611,22 +714,31 @@ export function Timeline({
       hovered?.queryId === activePlot.item.queryId && activeIndices.includes(hovered.binIndex);
     const selectedIndexIsSupported =
       selection?.queryId === activePlot.item.queryId && activeIndices.includes(selectedBinIndex);
-    const active = {
-      queryId: activePlot.item.queryId,
-      binIndex: hoveredIndexIsSupported
+    const keyboardHover = (
+      queryId: string,
+      binIndex: number,
+    ): Exclude<HoveredPoint, null> => ({
+      queryId,
+      binIndex,
+      binKey: displayBins[binIndex].key,
+      source: "keyboard",
+    });
+    const active = keyboardHover(
+      activePlot.item.queryId,
+      hoveredIndexIsSupported
         ? hovered.binIndex
         : selectedIndexIsSupported
           ? selectedBinIndex
           : activeIndices.at(-1)!,
-    };
+    );
     let next = active;
     if (event.key === "ArrowLeft") {
       const previous = activeIndices.findLast((index) => index < active.binIndex);
-      next = { ...active, binIndex: previous ?? active.binIndex };
+      next = keyboardHover(active.queryId, previous ?? active.binIndex);
     }
     else if (event.key === "ArrowRight") {
       const following = activeIndices.find((index) => index > active.binIndex);
-      next = { ...active, binIndex: following ?? active.binIndex };
+      next = keyboardHover(active.queryId, following ?? active.binIndex);
     }
     else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       const currentIndex = Math.max(
@@ -646,7 +758,7 @@ export function Timeline({
           ? candidate
           : best;
       });
-      next = { queryId: nextQueryId, binIndex: closestIndex };
+      next = keyboardHover(nextQueryId, closestIndex);
     } else if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       if (!activePlot.pointsByBin.has(displayBins[active.binIndex].key)) return;
@@ -654,12 +766,16 @@ export function Timeline({
       return;
     } else return;
     event.preventDefault();
-    setHovered(next);
+    positionKeyboardPreview(next);
+    updateHovered(next);
   }
 
+  const indexedHoverBin = hovered ? displayBins[hovered.binIndex] : null;
   const hoverBin =
-    hovered && displayBins[hovered.binIndex]?.belowMinimumDenominator !== true
-      ? displayBins[hovered.binIndex]
+    hovered &&
+    indexedHoverBin?.key === hovered.binKey &&
+    indexedHoverBin.belowMinimumDenominator !== true
+      ? indexedHoverBin
       : null;
   const hoverPlot = hovered ? plots.find((plot) => plot.item.queryId === hovered.queryId) : null;
   const hoverPoint = hoverBin && hoverPlot ? hoverPlot.pointsByBin.get(hoverBin.key) ?? null : null;
@@ -682,9 +798,17 @@ export function Timeline({
   const viewportChanged =
     Math.abs(boundedViewport.start - fittedViewport.start) > 0.01 ||
     Math.abs(boundedViewport.end - fittedViewport.end) > 0.01;
+  const previewReady = previewKey !== null && readyPreviewKey === previewKey;
+  const previewFailed = previewKey !== null && failedPreviewKey === previewKey;
+  const previewImageUrl = matchingHoverPreview?.artwork.imageUrl || null;
 
   return (
-    <div className="timeline-wrap" role="group" aria-label={`${label} by time period`}>
+    <div
+      ref={wrapRef}
+      className="timeline-wrap"
+      role="group"
+      aria-label={`${label} by time period`}
+    >
       <svg
         ref={chartRef}
         className="timeline"
@@ -844,20 +968,6 @@ export function Timeline({
           </g>
         ))}
 
-        {hovered && hoverPlot && hoverPoint && hoverBin && (
-          <g
-            className="chart-tooltip"
-            transform={`translate(${Math.min(viewWidth - padRight - 196, Math.max(padLeft + 6, hoverX + 12))},${Math.max(padTop + 4, hoverY - 58)})`}
-            aria-hidden="true"
-          >
-            <rect width="184" height="48" rx="5" />
-            <text x="10" y="17">{hoverPlot.query.label}</text>
-            <text className="tooltip-value" x="10" y="34">
-              {hoverBin.label} · {formatValue(hoverPoint.value, metric)} · {hoverPoint.objectCount} {countingUnit === "catalog-record" ? `catalog record${hoverPoint.objectCount === 1 ? "" : "s"}` : `work${hoverPoint.objectCount === 1 ? "" : "s"}`}
-            </text>
-          </g>
-        )}
-
         <rect
           className={dragging ? "chart-interaction-layer dragging" : "chart-interaction-layer"}
           x={padLeft}
@@ -872,14 +982,48 @@ export function Timeline({
           onPointerUp={(event) => finishPointer(event)}
           onPointerCancel={(event) => finishPointer(event, true)}
           onPointerLeave={() => {
-            if (pointers.current.size === 0) setHovered(null);
+            if (pointers.current.size === 0) updateHovered(null);
           }}
           onWheel={handleWheel}
           onDoubleClick={resetViewport}
           onKeyDown={handleKeyboard}
-          onBlur={() => setHovered(null)}
+          onBlur={() => updateHovered(null)}
         />
       </svg>
+
+      {hoverPreviewContent && hoverPlot && hoverPoint && (
+        <div className="chart-hover-preview" aria-hidden="true">
+          {matchingHoverPreview && previewImageUrl && previewKey && !previewFailed && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              className={previewReady
+                ? "chart-hover-preview-image ready"
+                : "chart-hover-preview-image"}
+              src={previewImageUrl}
+              alt=""
+              width="132"
+              height="92"
+              decoding="async"
+              onLoad={() => setReadyPreviewKey(previewKey)}
+              onError={() => {
+                setReadyPreviewKey(null);
+                setFailedPreviewKey(previewKey);
+                onHoverPreviewError?.(matchingHoverPreview);
+              }}
+            />
+          )}
+          <div className="chart-hover-preview-copy">
+            <strong style={{ color: hoverPlot.color }}>
+              {hoverPreviewContent.conceptLabel} · {hoverPreviewContent.periodLabel}
+            </strong>
+            <span>
+              · {hoverPoint.objectCount} {countingUnit === "catalog-record"
+                ? `catalog record${hoverPoint.objectCount === 1 ? "" : "s"}`
+                : `work${hoverPoint.objectCount === 1 ? "" : "s"}`}
+            </span>
+          </div>
+        </div>
+      )}
 
       <div className="timeline-footer" aria-label="Chart series">
         <div className="legend-series-list">
