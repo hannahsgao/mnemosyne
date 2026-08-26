@@ -27,30 +27,43 @@ import {
   searchPageStateFromUrl,
   type SearchMode,
 } from "../lib/search-mode";
-import { formatTimelineYear, peakSelection, pointForBin, timelineWindow } from "../lib/timeline";
+import {
+  describeTimelineMetric,
+  formatTimelineYear,
+  peakSelection,
+  pointForBin,
+  timelineWindow,
+} from "../lib/timeline";
 import type {
   ChartSelection,
+  CorpusMetadata,
   EvidenceArtwork,
+  MetricMetadata,
   SearchResponse,
   SelectedEvidence,
 } from "../lib/types";
 
-const INITIAL_QUERY = "ship, harbor, bridge";
+const INITIAL_QUERY = "manuscript page, newspaper, comic strip";
 const EXAMPLE_QUERIES = [
   "mirror, portrait, self-portrait",
   "clock, chair, table, lamp",
-  "ship, harbor, bridge",
-  "mother and child, portrait, self-portrait",
   "crown, bonnet, top hat, bowler hat",
+  "manuscript page, newspaper, comic strip",
+  "crucifixion, public execution",
+  "sailing ship, steamship",
+  "palace interior, church interior, domestic interior, factory interior",
+  "Last Supper, banquet, tea party, café",
+  "powdered wig, bonnet, crinoline dress, flapper dress",
 ];
 const METADATA_EXAMPLE_QUERIES = [
-  "woodcut, engraving, etching, lithograph, screenprint",
-  "daguerreotype, albumen silver print, gelatin silver print, chromogenic print, inkjet print",
   "manuscript, printed book, newspaper",
   "bronze, marble, porcelain, plastic",
   "carriage, automobile, airplane",
+  "venice, paris, new york, los angeles",
+  "chariot, carriage, train, airplane",
 ];
 const INITIAL_VISIBLE_WORKS = 5;
+const VISIBLE_WORK_BATCH = 5;
 
 const SEARCH_INPUT_LABELS: Record<SearchMode, string> = {
   embedding: "Search artworks by visual content",
@@ -70,11 +83,6 @@ const SEARCH_MODE_TITLES: Record<SearchMode, string> = {
 const SEARCH_MODE_HELP: Record<SearchMode, string> = {
   embedding: "Describe what you want to see.",
   keyword: "Search words in the catalogue record.",
-};
-
-const CHART_HELP: Record<SearchMode, string> = {
-  embedding: "Higher values mean visual matches are more concentrated in that period than across the collection overall. Gaps mark periods with too little evidence.",
-  keyword: "Higher values mean a larger share of dated catalogue records match in that period. Gaps mark periods with too little evidence.",
 };
 
 type SearchOptions = {
@@ -122,13 +130,77 @@ function errorMessage(payload: unknown, fallback: string) {
     : fallback;
 }
 
+function ChartCalculationTooltip({ metric }: { metric: MetricMetadata }) {
+  const tooltipId = "chart-calculation-tooltip";
+  return (
+    <span className="chart-info">
+      <button
+        className="chart-info-trigger"
+        type="button"
+        aria-label="How this graph is calculated"
+        aria-describedby={tooltipId}
+      >
+        <svg viewBox="0 0 18 18" aria-hidden="true">
+          <circle cx="9" cy="9" r="7" />
+          <path d="M9 8v4.25" />
+          <circle className="chart-info-dot" cx="9" cy="5.4" r=".8" />
+        </svg>
+      </button>
+      <span className="chart-info-tooltip" id={tooltipId} role="tooltip">
+        <strong>How this graph is calculated</strong>
+        <span>{describeTimelineMetric(metric)}</span>
+      </span>
+    </span>
+  );
+}
+
+function institutionLabel(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "met" || normalized === "the met") return "The Met";
+  if (normalized === "nga" || normalized === "national gallery of art") {
+    return "National Gallery of Art";
+  }
+  if (normalized === "aic" || normalized === "art institute of chicago") {
+    return "Art Institute of Chicago";
+  }
+  return value || "Museum source unavailable";
+}
+
+function matchingItemLabel(
+  count: number,
+  countingUnit: CorpusMetadata["countingUnit"],
+) {
+  return `${count} matching ${itemNoun(count, countingUnit)}`;
+}
+
+function itemNoun(count: number, countingUnit: CorpusMetadata["countingUnit"]) {
+  if (countingUnit === "catalog-record") {
+    return `catalog record${count === 1 ? "" : "s"}`;
+  }
+  return `work${count === 1 ? "" : "s"}`;
+}
+
+function corpusSummary(corpus: CorpusMetadata) {
+  const label = corpus.label === corpus.id
+    ? "Open-access museum image corpus"
+    : corpus.label;
+  if (corpus.count === null) return label;
+  return `${corpus.count.toLocaleString()} ${itemNoun(corpus.count, corpus.countingUnit)} · ${label}`;
+}
+
 function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
   return (
     <a className="artwork-card" href={artwork.sourceRecordUrl} target="_blank" rel="noreferrer">
       <div className="artwork-image-wrap">
         {artwork.imageUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img className="artwork-image" src={artwork.imageUrl} alt="" loading="lazy" />
+          <img
+            className="artwork-image"
+            src={artwork.imageUrl}
+            alt=""
+            loading="lazy"
+            decoding="async"
+          />
         ) : (
           <div className="image-placeholder">No image</div>
         )}
@@ -136,9 +208,83 @@ function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
       <div className="artwork-copy">
         <strong title={artwork.title || "Untitled"}>{artwork.title || "Untitled"}</strong>
         <span title={artwork.artist}>{artwork.artist || "Unknown artist"}</span>
+        <em title={institutionLabel(artwork.institution)}>{institutionLabel(artwork.institution)}</em>
         <small>{artwork.dateDisplay} ↗</small>
       </div>
     </a>
+  );
+}
+
+function ArtworkCardSkeleton() {
+  return (
+    <div className="artwork-card artwork-card-loading" aria-hidden="true">
+      <div className="artwork-image-wrap" />
+      <div className="artwork-copy">
+        <span className="artwork-loading-line artwork-loading-title" />
+        <span className="artwork-loading-line artwork-loading-artist" />
+      </div>
+    </div>
+  );
+}
+
+function ProgressiveArtworkGrid({
+  artworks,
+  emptyMessage,
+  isLoading,
+  showEmpty,
+}: {
+  artworks: EvidenceArtwork[];
+  emptyMessage: string;
+  isLoading: boolean;
+  showEmpty: boolean;
+}) {
+  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_WORKS);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const visibleArtworks = artworks.slice(0, visibleCount);
+  const hasMore = visibleArtworks.length < artworks.length;
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (isLoading || !sentinel || !hasMore) return;
+
+    if (!("IntersectionObserver" in window)) {
+      setVisibleCount(artworks.length);
+      return;
+    }
+
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry?.isIntersecting) return;
+      observer.disconnect();
+      setVisibleCount((current) => Math.min(
+        artworks.length,
+        current + VISIBLE_WORK_BATCH,
+      ));
+    }, { rootMargin: "0px 0px 240px" });
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [artworks.length, hasMore, isLoading, visibleCount]);
+
+  return (
+    <>
+      <div className="artwork-grid" aria-busy={isLoading}>
+        {isLoading && Array.from({ length: INITIAL_VISIBLE_WORKS }, (_, index) => (
+          <ArtworkCardSkeleton key={index} />
+        ))}
+        {!isLoading && visibleArtworks.map((artwork) => (
+          <ArtworkCard key={artwork.artworkId} artwork={artwork} />
+        ))}
+        {!isLoading && showEmpty && <p className="no-works">{emptyMessage}</p>}
+      </div>
+      {!isLoading && artworks.length > INITIAL_VISIBLE_WORKS && (
+        <span className="sr-only" role="status" aria-atomic="true">
+          Showing {visibleArtworks.length} of {artworks.length} artworks.
+        </span>
+      )}
+      {!isLoading && hasMore && (
+        <div className="artwork-load-sentinel" ref={sentinelRef} aria-hidden="true" />
+      )}
+    </>
   );
 }
 
@@ -165,7 +311,6 @@ export default function Home() {
   const [hiddenQueryIds, setHiddenQueryIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [evidenceLoading, setEvidenceLoading] = useState(false);
-  const [showAllExamples, setShowAllExamples] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const requestId = useRef(0);
@@ -225,7 +370,6 @@ export default function Home() {
     setError(null);
     setEvidenceError(null);
     setSelection(null);
-    setShowAllExamples(false);
     setHiddenQueryIds(new Set());
 
     try {
@@ -292,9 +436,6 @@ export default function Home() {
   }
 
   async function loadEvidence(nextSelection: ChartSelection, context: EvidenceContext = {}) {
-    if (selection?.queryId !== nextSelection.queryId || selection?.binKey !== nextSelection.binKey) {
-      setShowAllExamples(false);
-    }
     setSelection(nextSelection);
     const activeQuery = context.query ?? submittedQuery;
     const activeMode = context.mode ?? submittedSearchMode;
@@ -376,8 +517,6 @@ export default function Home() {
     () => submittedSearchMode === "embedding" ? nearestMatchGroups(result) : [],
     [result, submittedSearchMode],
   );
-  const visibleItems = evidenceItems.slice(0, showAllExamples ? evidenceItems.length : INITIAL_VISIBLE_WORKS);
-  const hiddenExampleCount = Math.max(0, evidenceItems.length - INITIAL_VISIBLE_WORKS);
   const selectedQuery = result?.queries.find((query) => query.id === selection?.queryId) ?? null;
   const selectedBin = result?.bins.find((bin) => bin.key === selection?.binKey) ?? null;
   const selectedSeries = result?.series.find((series) => series.queryId === selection?.queryId) ?? null;
@@ -445,7 +584,7 @@ export default function Home() {
       </header>
 
       <div className="workspace">
-        <section className="search-area" aria-label="Search The Met collection">
+        <section className="search-area" aria-label="Search museum collections">
           <div className="search-controls">
             <div className="search-toolbar">
               <span className="search-mode-toggle" role="group" aria-label="Search method">
@@ -504,11 +643,12 @@ export default function Home() {
                     : "Searching the catalogue…"
                   : resultsTitle}
               </h2>
+              {!loading && result && <ChartCalculationTooltip metric={result.metric} />}
               {!loading && yearRange && <span>{yearRange}</span>}
             </div>
             {result && !loading && (
               <p>
-                {result.queries.length} {result.queries.length === 1 ? "term" : "terms"} · The Met public-domain collection
+                {result.queries.length} {result.queries.length === 1 ? "term" : "terms"} · {corpusSummary(result.corpus)}
               </p>
             )}
           </div>
@@ -528,8 +668,9 @@ export default function Home() {
               series={result.series}
               queries={result.queries}
               metric={result.metric}
+              countingUnit={result.corpus.countingUnit}
               label={resultsTitle}
-              description={CHART_HELP[submittedSearchMode]}
+              description={describeTimelineMetric(result.metric)}
               selection={selection}
               hiddenQueryIds={hiddenQueryIds}
               onSelect={(nextSelection) => void loadEvidence(nextSelection)}
@@ -564,7 +705,7 @@ export default function Home() {
               <div className="nearest-result-group" key={query.id}>
                 <div className="nearest-result-heading">
                   <h3>No strong visual matches for “{query.label}”</h3>
-                  <p>Showing {artworks.length} closest work{artworks.length === 1 ? "" : "s"}</p>
+                  <p>Showing {artworks.length} closest result{artworks.length === 1 ? "" : "s"}</p>
                 </div>
                 <div className="artwork-grid">
                   {artworks.map((artwork) => (
@@ -585,7 +726,7 @@ export default function Home() {
                 : `${selectedQuery.label} · ${selectedBin.label}`}
             </h2>
             {selectedPoint && submittedSearchMode === "keyword" && (
-              <p>{selectedPoint.objectCount} matching work{selectedPoint.objectCount === 1 ? "" : "s"}</p>
+              <p>{matchingItemLabel(selectedPoint.objectCount, result!.corpus.countingUnit)}</p>
             )}
             {selectedPoint && submittedSearchMode !== "keyword" && (
               <p>
@@ -593,42 +734,28 @@ export default function Home() {
                   ? "Loading artworks…"
                   : evidenceError
                     ? "Artworks unavailable"
-                    : `${selectedEvidence?.contributorCount ?? 0} matching work${(selectedEvidence?.contributorCount ?? 0) === 1 ? "" : "s"}`}
+                    : matchingItemLabel(selectedEvidence?.contributorCount ?? 0, result!.corpus.countingUnit)}
               </p>
             )}
           </div>
 
           {evidenceError && <p className="evidence-error" role="alert">{evidenceError}</p>}
-          <div className="artwork-grid" aria-busy={evidenceLoading}>
-            {evidenceLoading && <p className="no-works">Loading artworks…</p>}
-            {!evidenceLoading && visibleItems.map((artwork) => (
-              <ArtworkCard key={artwork.artworkId} artwork={artwork} />
-            ))}
-            {!evidenceLoading && !evidenceError && selection && evidenceItems.length === 0 && !loading && (
-              <p className="no-works">
-                {submittedSearchMode === "keyword"
-                  ? "No keyword matches in this period."
-                  : "No strong visual matches in this period."}
-              </p>
-            )}
-          </div>
-          {!evidenceLoading && hiddenExampleCount > 0 && (
-            <button
-              className="more-examples"
-              type="button"
-              aria-expanded={showAllExamples}
-              onClick={() => setShowAllExamples((current) => !current)}
-            >
-              {showAllExamples
-                ? "Show fewer works"
-                : `Show ${hiddenExampleCount} more work${hiddenExampleCount === 1 ? "" : "s"}`}
-            </button>
-          )}
+          <ProgressiveArtworkGrid
+            key={selection ? `${selection.queryId}:${selection.binKey}` : "unselected"}
+            artworks={evidenceItems}
+            emptyMessage={submittedSearchMode === "keyword"
+              ? "No keyword matches in this period."
+              : "No strong visual matches in this period."}
+            isLoading={evidenceLoading}
+            showEmpty={Boolean(!evidenceError && selection && evidenceItems.length === 0 && !loading)}
+          />
           </section>
         )}
 
         <footer className="source-footer">
-          Public-domain artwork images and catalogue data from The Metropolitan Museum of Art Open Access collection.
+          {submittedSearchMode === "embedding"
+            ? "Visual search uses public-domain artwork images and CC0 catalog data from The Metropolitan Museum of Art and the National Gallery of Art."
+            : "Metadata search uses catalog data from The Metropolitan Museum of Art Open Access collection."}
         </footer>
       </div>
     </main>

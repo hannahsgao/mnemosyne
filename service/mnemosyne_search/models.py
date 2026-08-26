@@ -94,6 +94,7 @@ class SeriesJSON(TypedDict):
     suppressedBinKeys: NotRequired[list[str]]
     cacheKey: str
     totalMatches: NotRequired[int]
+    nearestMatches: NotRequired[list[EvidenceCardJSON]]
 
 
 class EvidenceCardJSON(TypedDict):

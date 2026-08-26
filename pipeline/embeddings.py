@@ -24,6 +24,7 @@ from .build import CorpusBuildError, sha256_file
 
 EMBED_SCHEMA_VERSION = "mnemosyne-embedding-build/v1"
 SIGLIP_IMAGE_INPUT_POLICY = "remote-original-met-web-large-min-side-224/v2"
+DECLARED_REMOTE_IMAGE_INPUT_POLICY = "declared-remote-url/v1"
 DEFAULT_ALLOWED_IMAGE_HOSTS = ("images.metmuseum.org",)
 
 
@@ -220,14 +221,29 @@ class Siglip2LocalEncoder:
     def _resolved_image_url(self, url: str, *, prefer_web_large: bool) -> str:
         self._validate_remote_url(url)
         parsed = urlsplit(url)
+        is_met_image = parsed.hostname == "images.metmuseum.org"
         if (
             prefer_web_large
-            and parsed.hostname == "images.metmuseum.org"
+            and is_met_image
             and "/original/" in parsed.path
         ):
             parsed = parsed._replace(path=parsed.path.replace("/original/", "/web-large/", 1))
-        parsed = parsed._replace(path=quote(parsed.path, safe="/%:@"))
+        # Preserve the IIIF size segment exactly for adapters that declare a
+        # model-sized derivative (for example ``!512,512``). Met retains its
+        # original escaping behavior and web-large optimization.
+        path_safe = "/%:@" if is_met_image else "/%:@!,"
+        parsed = parsed._replace(path=quote(parsed.path, safe=path_safe))
         return urlunsplit(parsed)
+
+    @staticmethod
+    def _remote_input_policy(record: Mapping[str, str], raw_url: str) -> str:
+        declared = record.get("image_input_policy", "").strip()
+        if declared:
+            return declared
+        hostname = (urlsplit(raw_url).hostname or "").lower().rstrip(".")
+        if hostname == "images.metmuseum.org":
+            return SIGLIP_IMAGE_INPUT_POLICY
+        return DECLARED_REMOTE_IMAGE_INPUT_POLICY
 
     def _download(
         self, raw_url: str, *, prefer_web_large: bool = True
@@ -324,7 +340,7 @@ class Siglip2LocalEncoder:
                 )
             payload, input_source = self._download(raw_url, prefer_web_large=True)
             input_kind = "remote-stream"
-            input_policy = SIGLIP_IMAGE_INPUT_POLICY
+            input_policy = self._remote_input_policy(record, raw_url)
             image = self._decode_image(payload, input_source, artwork_id)
             original_url = self._resolved_image_url(raw_url, prefer_web_large=False)
             if input_source != original_url and min(image.size) < 224:
@@ -374,7 +390,11 @@ class Siglip2LocalEncoder:
                     "revision": self.revision,
                     "dimension": self.dimension,
                     "device": str(self._device),
+                    "batch_size": batch_size,
                     "image_input_policy": SIGLIP_IMAGE_INPUT_POLICY,
+                    "allowed_image_hosts": list(self._allowed_image_hosts),
+                    "max_image_bytes": self._max_image_bytes,
+                    "max_image_pixels": self._max_image_pixels,
                     "processor_class": self._processor.__class__.__qualname__,
                     "processor_config": getattr(self._processor, "to_dict", lambda: {})(),
                     "image_root": str(image_root.resolve()),
@@ -397,6 +417,14 @@ class Siglip2LocalEncoder:
                 ).encode("utf-8")
             )
             fingerprint.update(b"\n")
+            # Met records continue to omit this per-record suffix. Adapter-
+            # declared policies are bound so provenance cannot be mixed across
+            # differently prepared remote inputs.
+            declared_input_policy = record.get("image_input_policy", "").strip()
+            if declared_input_policy:
+                fingerprint.update(b"\x1eimage_input_policy\x1f")
+                fingerprint.update(declared_input_policy.encode("utf-8"))
+                fingerprint.update(b"\n")
         build_fingerprint = fingerprint.hexdigest()
 
         provenance_fields = (
@@ -426,6 +454,7 @@ class Siglip2LocalEncoder:
                     "fingerprint": build_fingerprint,
                     "rows": len(records),
                     "dimensions": self.dimension,
+                    "batch_size": batch_size,
                 }
                 if any(state.get(key) != value for key, value in expected.items()):
                     raise CorpusBuildError(
@@ -478,6 +507,7 @@ class Siglip2LocalEncoder:
                     build_fingerprint,
                     len(records),
                     completed,
+                    batch_size,
                 )
             if completed and self._progress:
                 self._progress(completed, len(records))
@@ -566,6 +596,7 @@ class Siglip2LocalEncoder:
                                 build_fingerprint,
                                 len(records),
                                 completed,
+                                batch_size,
                             )
                         if self._progress:
                             self._progress(completed, len(records))
@@ -594,6 +625,7 @@ class Siglip2LocalEncoder:
         fingerprint: str,
         rows: int,
         completed: int,
+        batch_size: int,
     ) -> None:
         temporary = path.with_suffix(".tmp")
         temporary.write_text(
@@ -603,6 +635,7 @@ class Siglip2LocalEncoder:
                     "fingerprint": fingerprint,
                     "rows": rows,
                     "dimensions": self.dimension,
+                    "batch_size": batch_size,
                     "completed": completed,
                 },
                 sort_keys=True,
@@ -629,7 +662,7 @@ class Siglip2LocalEncoder:
                 return
 
     def settings(self) -> Mapping[str, object]:
-        return {
+        settings: dict[str, object] = {
             "processor_class": self._processor.__class__.__name__,
             "model_class": self._model.__class__.__name__,
             "local_weights": True,
@@ -645,6 +678,19 @@ class Siglip2LocalEncoder:
             "runtime_versions": self._runtime_versions(),
             "checkpointed": self._checkpoint_dir is not None,
         }
+        input_policies = sorted(
+            {
+                row.get("input_policy", "").strip()
+                for row in self._input_provenance
+                if row.get("input_policy", "").strip()
+            }
+        )
+        if input_policies and input_policies != [SIGLIP_IMAGE_INPUT_POLICY]:
+            settings["image_input_policy"] = (
+                input_policies[0] if len(input_policies) == 1 else "per-record-mixed"
+            )
+            settings["image_input_policies"] = input_policies
+        return settings
 
     @staticmethod
     def _runtime_versions() -> Mapping[str, str]:
@@ -705,19 +751,64 @@ def _ordered_embedding_records(
     return records, manifest
 
 
-def _normalize(matrix):
+def _write_normalized_matrix(
+    matrix,
+    output_path: Path,
+    *,
+    dtype: str,
+    rows_per_batch: int = 4096,
+):
+    """Write normalized vectors without mutating a resumable encoder matrix.
+
+    SigLIP checkpoints are raw model outputs. Publication therefore streams
+    normalized rows into its own staging memmap so a failed publish can safely
+    retry from the unchanged raw checkpoint without normalizing it twice.
+    """
+
     import numpy as np
 
-    values = np.asarray(matrix, dtype=np.float32)
+    values = np.asarray(matrix)
     if values.ndim != 2:
         raise CorpusBuildError(f"encoder returned shape {values.shape}; expected a matrix")
-    norms = np.linalg.norm(values, axis=1, keepdims=True)
-    if np.any(~np.isfinite(values)) or np.any(~np.isfinite(norms)):
-        raise CorpusBuildError("encoder returned non-finite values")
-    if np.any(norms == 0):
-        raise CorpusBuildError("encoder returned a zero vector")
-    np.divide(values, norms, out=values)
-    return values
+    if rows_per_batch < 1:
+        raise ValueError("normalization batch size must be positive")
+    storage_dtype = np.float16 if dtype == "float16" else np.float32
+    normalized = np.lib.format.open_memmap(
+        output_path,
+        mode="w+",
+        dtype=storage_dtype,
+        shape=values.shape,
+    )
+    try:
+        for offset in range(0, values.shape[0], rows_per_batch):
+            batch = np.asarray(
+                values[offset : offset + rows_per_batch], dtype=np.float32
+            )
+            norms = np.linalg.norm(batch, axis=1, keepdims=True)
+            if np.any(~np.isfinite(batch)) or np.any(~np.isfinite(norms)):
+                raise CorpusBuildError("encoder returned non-finite values")
+            if np.any(norms == 0):
+                raise CorpusBuildError("encoder returned a zero vector")
+            # The division result is a fresh array. In particular, never use
+            # ``out=batch`` because batch can view embeddings.work.npy.
+            normalized[offset : offset + len(batch)] = batch / norms
+        normalized.flush()
+    except Exception:
+        del normalized
+        output_path.unlink(missing_ok=True)
+        raise
+    return normalized
+
+
+def _close_memmap(matrix) -> None:
+    if matrix is None:
+        return
+    flush = getattr(matrix, "flush", None)
+    if callable(flush):
+        flush()
+    mapping = getattr(matrix, "_mmap", None)
+    if mapping is not None and not mapping.closed:
+        mapping.close()
 
 
 def _artifact(root: Path, path: Path) -> dict[str, object]:
@@ -821,36 +912,46 @@ def build_embedding_index(
 
     records, corpus_manifest = _ordered_embedding_records(corpus_root, allow_unreviewed_images)
     embedded_image_rows = _embedded_image_rows(records, images_root, encoder.requires_local_images)
-    matrix = _normalize(encoder.encode(records, images_root, batch_size))
-    provenance = getattr(encoder, "input_provenance", ())
-    if provenance:
-        if len(provenance) != len(records):
-            raise CorpusBuildError("encoder input provenance does not align with corpus rows")
-        for record, embedded, source in zip(
-            records, embedded_image_rows, provenance, strict=True
-        ):
-            if source.get("artwork_id") != record["artwork_id"]:
-                raise CorpusBuildError("encoder input provenance artwork order is inconsistent")
-            embedded.update(
-                {
-                    "input_sha256": source.get("input_sha256", ""),
-                    "input_kind": source.get("input_kind", ""),
-                    "input_source": source.get("input_source", ""),
-                    "input_width": source.get("input_width", ""),
-                    "input_height": source.get("input_height", ""),
-                    "input_policy": source.get("input_policy", ""),
-                }
-            )
-    if matrix.shape != (len(records), encoder.dimension):
-        raise CorpusBuildError(
-            f"encoder returned shape {matrix.shape}; expected {(len(records), encoder.dimension)}"
-        )
-
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(
         tempfile.mkdtemp(prefix=f".{destination.name}.staging-", dir=destination.parent)
     )
+    raw_matrix = None
+    matrix = None
     try:
+        raw_matrix = encoder.encode(records, images_root, batch_size)
+        provenance = getattr(encoder, "input_provenance", ())
+        if provenance:
+            if len(provenance) != len(records):
+                raise CorpusBuildError(
+                    "encoder input provenance does not align with corpus rows"
+                )
+            for record, embedded, source in zip(
+                records, embedded_image_rows, provenance, strict=True
+            ):
+                if source.get("artwork_id") != record["artwork_id"]:
+                    raise CorpusBuildError(
+                        "encoder input provenance artwork order is inconsistent"
+                    )
+                embedded.update(
+                    {
+                        "input_sha256": source.get("input_sha256", ""),
+                        "input_kind": source.get("input_kind", ""),
+                        "input_source": source.get("input_source", ""),
+                        "input_width": source.get("input_width", ""),
+                        "input_height": source.get("input_height", ""),
+                        "input_policy": source.get("input_policy", ""),
+                    }
+                )
+        npy_path = staging / "embeddings.npy"
+        matrix = _write_normalized_matrix(raw_matrix, npy_path, dtype=dtype)
+        matrix_shape = matrix.shape
+        if matrix_shape != (len(records), encoder.dimension):
+            raise CorpusBuildError(
+                f"encoder returned shape {matrix_shape}; "
+                f"expected {(len(records), encoder.dimension)}"
+            )
+
         deployment_copies = {
             "corpus.csv": corpus_root / "corpus.csv",
             "date-weights.npz": corpus_root / "date-weights.npz",
@@ -878,16 +979,6 @@ def build_embedding_index(
         embedded_images_path = staging / "embedded-images.manifest.csv"
         _write_csv(embedded_images_path, embedded_image_rows)
 
-        storage_matrix = matrix.astype(
-            np.float16 if dtype == "float16" else np.float32, copy=False
-        )
-        # All retrieval backends must index the exact values the service will
-        # load from embeddings.npy. Building FAISS from the pre-quantized
-        # matrix makes nominally exact backends disagree for close neighbors.
-        deployed_matrix = np.asarray(storage_matrix, dtype=np.float32)
-        npy_path = staging / "embeddings.npy"
-        np.save(npy_path, storage_matrix, allow_pickle=False)
-
         index_backend = "numpy-flat-ip"
         faiss_path = staging / "index.faiss"
         if not write_faiss:
@@ -898,9 +989,13 @@ def build_embedding_index(
             except ImportError:
                 wrote_faiss = False
             else:
+                # Index the exact stored (and potentially float16-quantized)
+                # values that the NumPy backend will load.
+                deployed_matrix = np.asarray(matrix, dtype=np.float32)
                 index = faiss.IndexFlatIP(encoder.dimension)
                 index.add(np.ascontiguousarray(deployed_matrix, dtype=np.float32))
                 faiss.write_index(index, str(faiss_path))
+                del deployed_matrix
                 wrote_faiss = True
                 index_backend = "faiss-index-flat-ip"
 
@@ -928,8 +1023,8 @@ def build_embedding_index(
                 "settings": dict(encoder.settings()),
             },
             "matrix": {
-                "rows": matrix.shape[0],
-                "dimensions": matrix.shape[1],
+                "rows": matrix_shape[0],
+                "dimensions": matrix_shape[1],
                 "dtype": dtype,
                 "l2_normalized": True,
                 "row_order": "corpus.csv embedding_offset",
@@ -962,6 +1057,10 @@ def build_embedding_index(
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        _close_memmap(matrix)
+        matrix = None
+        _close_memmap(raw_matrix)
+        raw_matrix = None
         if destination.exists():
             if any(destination.iterdir()):
                 raise CorpusBuildError(
@@ -970,6 +1069,8 @@ def build_embedding_index(
             destination.rmdir()
         staging.replace(destination)
     finally:
+        _close_memmap(matrix)
+        _close_memmap(raw_matrix)
         if staging.exists():
             shutil.rmtree(staging)
     cleanup_checkpoint = getattr(encoder, "cleanup_checkpoint", None)

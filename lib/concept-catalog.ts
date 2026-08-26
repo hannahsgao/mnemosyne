@@ -474,9 +474,6 @@ export async function loadConceptSearch(
     queries: unique.map((concept) => ({ id: `concept:${concept.id}`, label: concept.label, normalized: concept.normalized })),
     corpus: {
       ...catalog.manifest.corpus,
-      label: catalog.manifest.corpus.label === catalog.manifest.corpus.id
-        ? "The Met public-domain image collection"
-        : catalog.manifest.corpus.label,
       view: "all",
       filters: {},
     },

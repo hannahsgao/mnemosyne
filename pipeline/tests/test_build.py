@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scipy import sparse
 
@@ -151,6 +152,120 @@ class CorpusBuildTests(unittest.TestCase):
             self.assertEqual(manifests[0], manifests[1])
             parsed = json.loads(manifests[0])
             self.assertEqual(parsed["source"]["input_filename"], "ArtiFact_clean.csv")
+
+    def test_failed_build_leaves_no_partial_output_and_retry_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "ArtiFact_clean.csv"
+            write_fixture(source, self.fixture_rows())
+
+            for initial_state in ("absent", "empty"):
+                with self.subTest(initial_state=initial_state):
+                    output = root / f"build-{initial_state}"
+                    if initial_state == "empty":
+                        output.mkdir()
+
+                    with patch(
+                        "pipeline.build._write_sparse_npz",
+                        side_effect=CorpusBuildError("injected staging failure"),
+                    ):
+                        with self.assertRaisesRegex(
+                            CorpusBuildError, "injected staging failure"
+                        ):
+                            build_corpus(
+                                source,
+                                output,
+                                corpus_version="fixture-v1",
+                                source_revision="deadbeef",
+                                retrieved_at="2026-08-03T00:00:00Z",
+                            )
+
+                    if initial_state == "absent":
+                        self.assertFalse(output.exists())
+                    else:
+                        self.assertEqual(list(output.iterdir()), [])
+                    self.assertEqual(
+                        list(root.glob(f".{output.name}.staging-*")), []
+                    )
+
+                    build_corpus(
+                        source,
+                        output,
+                        corpus_version="fixture-v1",
+                        source_revision="deadbeef",
+                        retrieved_at="2026-08-03T00:00:00Z",
+                    )
+                    self.assertTrue((output / "build-manifest.json").is_file())
+                    self.assertTrue((output / "corpus.csv").is_file())
+
+    def test_image_input_policy_is_preserved_only_when_declared(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "nga-visual.csv"
+            output = root / "build"
+            row = {
+                **self.fixture_rows()[0],
+                "object_ID": "NGA_1",
+                "image_url": (
+                    "https://api.nga.gov/iiif/example/full/!1024,1024/0/default.jpg"
+                ),
+                "image_path": "",
+                "image_input_policy": "nga-iiif-fit-1024-short-side-256/v1",
+            }
+            write_fixture(source, [row], (*FIELDS, "image_input_policy"))
+
+            build_corpus(
+                source,
+                output,
+                corpus_version="nga-fixture-v1",
+                source_revision="deadbeef",
+                retrieved_at="2026-08-13T00:00:00Z",
+            )
+
+            with (output / "images.manifest.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                reader = csv.DictReader(handle)
+                images = list(reader)
+                self.assertIn("image_input_policy", reader.fieldnames or ())
+            self.assertEqual(
+                images[0]["image_input_policy"],
+                "nga-iiif-fit-1024-short-side-256/v1",
+            )
+
+    def test_records_an_explicit_catalog_record_counting_unit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.csv"
+            output = root / "build"
+            write_fixture(source, self.fixture_rows(), FIELDS)
+
+            manifest = build_corpus(
+                source,
+                output,
+                corpus_version="catalog-record-fixture-v1",
+                source_revision="deadbeef",
+                retrieved_at="2026-08-14T00:00:00Z",
+                counting_unit="catalog-record",
+            )
+
+            self.assertEqual(manifest["counting_unit"], "catalog-record")
+            self.assertEqual(manifest["corpus"]["countingUnit"], "catalog-record")
+
+    def test_rejects_unknown_counting_unit_before_expensive_processing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.csv"
+            write_fixture(source, self.fixture_rows(), FIELDS)
+
+            with self.assertRaisesRegex(CorpusBuildError, "counting_unit must be one of"):
+                build_corpus(
+                    source,
+                    root / "build",
+                    corpus_version="bad-unit-v1",
+                    source_revision="deadbeef",
+                    counting_unit="physical-objects",
+                )
 
     def test_dirty_filename_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

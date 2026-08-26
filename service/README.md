@@ -92,12 +92,19 @@ y-domain while panning or zooming, and keeps synthetic zeroes out of evidence
 selection. Zero means no qualifying match was found in this indexed corpus and
 period—not that the concept was absent from art history.
 
-There is no period-independent evidence strip. `selectedEvidence` supplies only
-the strongest score-qualified contributors for the selected plotted period,
-de-duplicated by `visual_cluster_id`. Automatic period selection prefers a
-reliable period supported by at least three distinct clusters, then falls back
-to any plotted period; the cluster count is a selection preference, not a
-corpus-wide abstention gate.
+There is no period-independent score-qualified evidence strip.
+`selectedEvidence` supplies only the strongest score-qualified contributors for
+the selected plotted period, de-duplicated by `visual_cluster_id`. Automatic
+period selection prefers a reliable period supported by at least three distinct
+clusters, then falls back to any plotted period; the cluster count is a
+selection preference, not a corpus-wide abstention gate.
+
+When a series has no score-qualified rows at all, its optional `nearestMatches`
+field exposes up to 20 of the closest global candidates, in score order and
+de-duplicated by visual cluster. These cards are explicitly exploratory:
+`contributor` is `false`, `contributionWeight` is `0`, and they do not create
+timeline points or period evidence. The field is absent whenever at least one
+row passes the strict score gate.
 
 ### Artifact contract
 
@@ -241,7 +248,7 @@ timeline aggregate query.
 Local images recorded by the embedding manifest are available at
 `GET /v1/images/{artworkId}`. Stream-built bundles normally contain no artwork
 pixels, so their evidence cards use the compact corpus's remote image URL and
-link through `sourceRecordUrl` to the corresponding Met object. The web app
+link through `sourceRecordUrl` to the corresponding source-museum record. The web app
 proxies local artifact images through a same-origin, immutable-cache endpoint;
 arbitrary filesystem paths are never accepted from HTTP requests.
 
@@ -250,13 +257,36 @@ series; normalized duplicates are removed in first-seen order, and one to five
 unique series are accepted. The response is `mnemosyne.search.v1` and contains
 ordered queries, shared corpus/model/metric/bin metadata, one trace per query,
 low-signal diagnostics, and period-specific `selectedEvidence` with strongest
-cards for the selected series and plotted bin. If no dated match passes the
-score threshold, the series has no points and `selectedEvidence` is `null`.
+cards for the selected series and plotted bin. If no row passes the score
+threshold, the series has no points, `selectedEvidence` is `null`, and that
+series includes the non-contributing `nearestMatches` fallback described above.
 
 Series cache entries are keyed independently by normalized query, corpus and
 model versions, prompt version, view, filters, metric version, candidate and
 qualification fractions, evidence score/cluster settings, and counting unit.
 Selection changes do not invalidate them.
+
+The embedding service retains 64 series by default. A measured 1,703-bin
+production entry is roughly 0.72 MiB of Python-owned data, so increasing this to
+512 could add roughly 368 MiB before allocator overhead. Set
+`MNEMOSYNE_CACHE_MAX_ENTRIES` or `--cache-max-entries` explicitly after measuring
+the deployed process; the launch profile keeps 64.
+
+Cold series batches are guarded by one process-wide lock. Already-cached calls
+bypass it, and a cache recheck inside the lock deduplicates identical or
+overlapping cold calls. Distinct cold matrix scans are intentionally serialized
+on the two-CPU launch host. `MNEMOSYNE_MAX_CONCURRENT_SEARCHES` controls HTTP
+admission only; it is overload rejection, not per-IP rate limiting or a promise
+of parallel compute.
+
+For the private Hugging Face profile, authentication is enforced by private
+Space ingress and the web proxy supplies an HF read token. The container starts
+with `MNEMOSYNE_HTTP_AUTH_MODE=disabled` so it does not demand an incompatible
+second bearer value in the same `Authorization` header. Other self-hosted
+deployments can set `MNEMOSYNE_HTTP_AUTH_MODE=required` together with
+`MNEMOSYNE_SERVICE_TOKEN`. See
+[`../deploy/huggingface/README.md`](../deploy/huggingface/README.md) for the
+isolated Space and private-bucket procedure.
 
 ## Verify
 

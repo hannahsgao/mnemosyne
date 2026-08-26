@@ -5,12 +5,42 @@ import {
   buildSharedDecadeBins,
   contiguousTimelineRuns,
   dataTimelineViewport,
+  describeTimelineMetric,
   monotoneTimelinePath,
   peakSelection,
   timelineRenderRuns,
   timelineWindow,
 } from "./timeline.ts";
-import type { SearchResponse, SearchSeries, TimeBin } from "./types.ts";
+import type { MetricMetadata, SearchResponse, SearchSeries, TimeBin } from "./types.ts";
+
+function metric(unit: MetricMetadata["unit"], percentile: number | null = null): MetricMetadata {
+  return {
+    id: `test-${unit}`,
+    version: "test",
+    label: "Test metric",
+    percentile,
+    unit,
+  };
+}
+
+test("explains each timeline metric without implying popularity", () => {
+  const lift = describeTimelineMetric(metric("lift", 0.001));
+  assert.match(lift, /0\.1%/);
+  assert.match(lift, /1×/);
+  assert.match(lift, /few works/);
+  assert.match(lift, /not historical popularity/);
+  assert.match(describeTimelineMetric(metric("lift", 0.002)), /0\.2%/);
+
+  const frequency = describeTimelineMetric(metric("frequency"));
+  assert.match(frequency, /catalogue metadata/);
+  assert.match(frequency, /raw matching-record count/);
+  assert.match(frequency, /not historical popularity/);
+
+  const relativeDensity = describeTimelineMetric(metric("relative-density"));
+  assert.match(relativeDensity, /largest period count/);
+  assert.match(relativeDensity, /result sample/);
+  assert.match(relativeDensity, /not collection-wide frequency or historical popularity/);
+});
 
 test("builds one shared, gap-free set of decade bins", () => {
   const bins = buildSharedDecadeBins([1899, 1912, null]);

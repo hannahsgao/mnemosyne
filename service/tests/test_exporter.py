@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
@@ -189,6 +190,31 @@ class ConceptExporterTests(unittest.TestCase):
             self.assertEqual(
                 sorted(path.name for path in (release / "evidence").glob("*.json")),
                 ["horse.json", "ship.json"],
+            )
+
+    def test_catalog_record_counting_unit_is_preserved_in_frontend_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "data" / "v1"
+            artifacts = replace(self.artifacts, counting_unit="catalog-record")
+
+            manifest, _ = export_catalog(
+                artifacts,
+                self.source,
+                output,
+                CountingEncoder(),
+                prompt_ensemble=self.prompt,
+                config=self.config,
+                artifact_manifest_hash=self.manifest_hash,
+                batch_size=2,
+            )
+
+            release = self._release(output)
+            written_manifest = json.loads(
+                (release / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["corpus"]["countingUnit"], "catalog-record")
+            self.assertEqual(
+                written_manifest["corpus"]["countingUnit"], "catalog-record"
             )
 
     def test_subset_release_is_inspectable_without_replacing_pointer(self) -> None:

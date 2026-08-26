@@ -80,7 +80,12 @@ test("accepts catalog-record manifests emitted for combined institutional corpor
     fetch: fixtureFetch([], {
       [releaseManifestUrl]: {
         ...manifest,
-        corpus: { ...corpus, countingUnit: "catalog-record" },
+        corpus: {
+          ...corpus,
+          id: "met-nga-combined-v1",
+          label: "met-nga-combined-v1",
+          countingUnit: "catalog-record",
+        },
       },
     }),
   });
@@ -88,6 +93,7 @@ test("accepts catalog-record manifests emitted for combined institutional corpor
   assert.equal(catalog.manifest.corpus.countingUnit, "catalog-record");
   const search = await loadConceptSearch(catalog, ["Horse"]);
   assert.equal(search.corpus.countingUnit, "catalog-record");
+  assert.equal(search.corpus.label, "met-nga-combined-v1");
 });
 
 test("resolves labels and aliases exactly while exposing the canonical concept", async () => {

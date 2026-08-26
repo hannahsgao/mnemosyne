@@ -35,6 +35,7 @@ from .prompting import EncodedSeries, PromptEnsemble
 SCHEMA_VERSION = "mnemosyne.search.v1"
 EVIDENCE_SCHEMA_VERSION = "mnemosyne.evidence.v1"
 METRIC_ID = "score-qualified-visual-concentration-lift"
+NEAREST_MATCH_LIMIT = 20
 
 
 def _display_image_url(raw_url: object) -> str:
@@ -561,7 +562,7 @@ class SearchService:
         result: SeriesComputation,
         corpus: ResolvedCorpus,
     ) -> SeriesJSON:
-        return {
+        payload: SeriesJSON = {
             "queryId": term.id,
             "k": result.evidence_k,
             "threshold": result.evidence_threshold if result.evidence_k else None,
@@ -585,6 +586,31 @@ class SearchService:
             ],
             "cacheKey": result.cache_key,
         }
+        if result.evidence_k == 0:
+            payload["nearestMatches"] = self._nearest_matches_payload(result)
+        return payload
+
+    def _nearest_matches_payload(
+        self, computation: SeriesComputation
+    ) -> list[EvidenceCardJSON]:
+        """Return closest global neighbors without treating them as evidence."""
+
+        cards: list[EvidenceCardJSON] = []
+        seen_clusters: set[str] = set()
+        for raw_row, raw_score in zip(
+            computation.hit_indices, computation.hit_scores
+        ):
+            row = int(raw_row)
+            cluster = str(
+                self.artifacts.metadata[row].get("visualClusterId") or f"row-{row}"
+            )
+            if cluster in seen_clusters:
+                continue
+            seen_clusters.add(cluster)
+            cards.append(self._evidence_card(row, float(raw_score), 0.0, False))
+            if len(cards) >= NEAREST_MATCH_LIMIT:
+                break
+        return cards
 
     def _selected_bin_index(
         self,

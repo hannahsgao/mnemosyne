@@ -114,6 +114,157 @@ URLs without downloading the images. Pass a positive sample size for a seeded
 proof corpus. Supplying `--image-dir` opts into a normalized local image cache
 instead.
 
+## Build the National Gallery of Art visual corpus
+
+The NGA path consumes only the three official CSVs from a pinned revision of
+[`NationalGalleryOfArt/opendata`](https://github.com/NationalGalleryOfArt/opendata):
+`objects.csv`, `published_images.csv`, and `object_associations.csv`. Image
+eligibility is gated by the image-level `published_images.openaccess=1` flag and
+`viewtype=primary`; restricted images are never downloaded, embedded, cached,
+or displayed.
+
+Pin the source checkout first:
+
+```bash
+git clone https://github.com/NationalGalleryOfArt/opendata.git /path/to/nga-opendata
+git -C /path/to/nga-opendata checkout PINNED_NGA_COMMIT
+git -C /path/to/nga-opendata rev-parse HEAD
+```
+
+Prepare a 1,024-row preflighted smoke corpus before the full run:
+
+```bash
+python3 -m pipeline prepare-nga-visual \
+  --objects /path/to/nga-opendata/data/objects.csv \
+  --published-images /path/to/nga-opendata/data/published_images.csv \
+  --object-associations /path/to/nga-opendata/data/object_associations.csv \
+  --output-csv /path/to/work/nga-visual-smoke-1024.csv \
+  --source-revision PINNED_NGA_COMMIT \
+  --sample-size 1024 \
+  --workers 32
+```
+
+Use `--sample-size 0` for the complete selection after the smoke passes. The
+adapter performs a resumable header-only IIIF preflight unless
+`--no-preflight` is explicitly supplied. It also:
+
+- excludes virtual objects and records without trustworthy work dates;
+- does not substitute an artist lifespan when `displaydate` is missing or
+  explicitly unknown;
+- chooses duplicate nominal primary images by numeric sequence and UUID;
+- maps `relationship=inseparable` children through
+  `object_associations.csv` to a shared physical-object root without deleting
+  catalog rows;
+- requests a bounded NGA IIIF derivative under the versioned policy
+  `nga-iiif-fit-1024-short-side-256/v1`.
+
+The 1,024 px derivative is already substantially smaller than the museum
+original. It is intentional even though SigLIP's final processor input is 224
+px: a local 512-versus-1,024 retrieval check showed enough vector movement to
+affect close ranks, while 1,024-versus-2,048 was effectively stable. Keep the
+1,024 policy for production unless a larger retrieval benchmark supports a new
+versioned policy.
+
+For official revision
+`4a1aef41c56f4c20924ffe40898f9ffce000aabf`, the strict full adapter output is
+56,992 catalog rows representing 53,829 physical-object IDs. Its manifest
+records the source checksums, rights/date exclusions, IIIF policy, association
+counts, preflight state, and output checksum.
+
+Build the bootstrap corpus with the same unbounded date-rule configuration as
+the production Met bundle. In particular, do not pass `--min-year` or
+`--max-year`; a different date contract will be rejected at merge time.
+
+```bash
+python3 -m pipeline build \
+  --input /path/to/work/nga-visual.csv \
+  --output /path/to/artifacts/nga-visual-bootstrap-corpus \
+  --corpus-version nga-openaccess-bootstrap-v1 \
+  --source-revision PINNED_NGA_COMMIT \
+  --source-url https://github.com/NationalGalleryOfArt/opendata \
+  --source-kind nga-open-data-local-csv \
+  --counting-unit catalog-record \
+  --retrieved-at 2026-08-13T10:00:00Z \
+  --metadata-license https://creativecommons.org/publicdomain/zero/1.0/ \
+  --source-payload /path/to/work/nga-visual.manifest.json \
+  --source-payload /path/to/work/nga-visual.availability.csv
+
+python3 -m pipeline embed \
+  --corpus-dir /path/to/artifacts/nga-visual-bootstrap-corpus \
+  --output /path/to/artifacts/nga-visual-bootstrap-siglip2 \
+  --encoder siglip2 \
+  --model google/siglip2-base-patch16-224 \
+  --model-revision 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2 \
+  --dtype float32 \
+  --batch-size 32 \
+  --device auto \
+  --download-workers 24 \
+  --image-host api.nga.gov \
+  --no-build-faiss
+```
+
+The first embedding pass records the exact response bytes and actual decoded
+dimensions. Reconcile those facts into the canonical corpus, then reuse the
+already-computed vectors only after exact artwork-order validation:
+
+```bash
+python3 -m pipeline derive-embedded-corpus \
+  --bundle /path/to/artifacts/nga-visual-bootstrap-siglip2 \
+  --visual-manifest /path/to/work/nga-visual.manifest.json \
+  --output /path/to/work/nga-visual-content-hashed.csv
+
+python3 -m pipeline build \
+  --input /path/to/work/nga-visual-content-hashed.csv \
+  --output /path/to/artifacts/nga-visual-content-hashed-corpus \
+  --corpus-version nga-openaccess-content-hashed-v1 \
+  --source-revision PINNED_NGA_COMMIT \
+  --source-url https://github.com/NationalGalleryOfArt/opendata \
+  --source-kind nga-open-data-content-hashed-csv \
+  --counting-unit catalog-record \
+  --retrieved-at 2026-08-13T10:00:00Z \
+  --metadata-license https://creativecommons.org/publicdomain/zero/1.0/ \
+  --source-payload /path/to/work/nga-visual-content-hashed.manifest.json \
+  --source-payload /path/to/work/nga-visual.manifest.json \
+  --source-payload /path/to/work/nga-visual.availability.csv
+
+python3 -m pipeline repack-embedded-bundle \
+  --embedding-bundle /path/to/artifacts/nga-visual-bootstrap-siglip2 \
+  --corpus-dir /path/to/artifacts/nga-visual-content-hashed-corpus \
+  --output /path/to/artifacts/nga-visual-siglip2-final
+```
+
+`catalog-record` is the honest timeline unit because the NGA selection retains
+separately searchable pages and inseparable child records. Their official
+physical-object roots remain available for diagnostics and de-duplication.
+
+### Merge completed Met and NGA bundles
+
+The merge operation does not re-embed the Met. It accepts only completed,
+content-hash-reconciled bundles with the same model ID, pinned revision,
+processor/runtime contract, float32 dimension, normalization, and date rules.
+It concatenates vectors in argument order and rebuilds combined bins,
+denominators, coverage, offsets, checksums, and nested source provenance.
+
+```bash
+python3 -m pipeline merge-embedded-bundles \
+  --bundle /path/to/artifacts/met-visual-public-domain-siglip2-final \
+  --bundle /path/to/artifacts/nga-visual-siglip2-final \
+  --output /path/to/artifacts/met-nga-siglip2-v1 \
+  --corpus-version met-nga-siglip2-v1 \
+  --corpus-label "The Met and National Gallery of Art open-access image catalog"
+```
+
+A mixed Met/NGA output reports `countingUnit=catalog-record`, preserves the
+per-row Met and NGA image-input policies, and lists both allowed image hosts.
+With the current 142,482-row Met bundle and the strict 56,992-row NGA snapshot,
+the full float32 matrix is 199,474 × 768, about 584 MiB before metadata. Run the
+full adapter and embedding only after the smoke bundle loads in
+`ArtifactBundle` and returns reasonable evidence through the local service.
+The production Hugging Face profile is pinned to this completed 199,474-record
+merged bundle. Its deployment guard validates the merged corpus ID, label,
+catalog-record counting unit, source composition, matrix dimensions, and
+artifact inventory; do not deploy the 1,024-row smoke bundle as a release.
+
 ## Date rules
 
 The manifest pins `artifact-bootstrap-dates/v1` and all rule parameters.

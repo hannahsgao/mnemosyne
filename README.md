@@ -2,13 +2,13 @@
 
 Mnemosyne is a “Google Ngram for art”: search a visual idea, see how its signal changes across time, and trace every point back to example artworks.
 
-The public visual-concept path is static-first. A versioned catalog is encoded
-offline with the exact text tower paired to the completed SigLIP image matrix.
-Cloudflare serves compact per-concept timelines immediately and loads a
-deduplicated evidence bundle only after a visitor selects a period. Ordinary
-visual browsing does not load PyTorch, scan vectors, or depend on a Python
-service. The D1/FTS path remains available as a separately labelled metadata
-keyword search.
+The public product has two deliberately different search modes. **Metadata**
+uses the existing D1/FTS path to match catalogue text. **Visual** accepts one to
+five arbitrary phrases, embeds them at request time with the exact SigLIP text
+tower paired to the existing artwork vectors, and returns independent timelines
+plus period-specific artwork evidence. The browser calls only same-origin web
+routes; model weights, artifacts, and private backend credentials stay on the
+server.
 
 The repository contains the interaction slice and two artifact-backed retrieval
 paths. The quickest full-corpus path uses the Met's official Open Access export
@@ -25,14 +25,15 @@ and a local SQLite FTS5 index:
 The embedding path provides visual-concept retrieval. Its offline builder
 streams each artwork through a pinned SigLIP 2 image tower, discards the pixels,
 and publishes a normalized float32 `embeddings.npy` matrix keyed back to compact
-Met metadata. That matrix is the canonical exact inner-product index; an exact
-FAISS `IndexFlatIP` file is optional. Requests run only the matching text tower,
-exact retrieval, and global top-1% concentration lift.
+museum metadata. The Met and National Gallery of Art adapters can be built as
+separate immutable bundles and merged without recomputing either source's
+vectors. That matrix is the canonical exact inner-product index; an exact FAISS
+`IndexFlatIP` file is optional. Requests run only the matching text tower, exact
+retrieval, and global top-1% concentration lift.
 
-The web app exposes URL-backed **Visual concepts / Metadata keywords** modes.
-Visual concepts are the static production default. Metadata keyword requests
-use the Cloudflare Worker and D1 corpus; an optional live embedding backend is
-kept only for filtered or never-before-seen exact queries.
+The web app exposes URL-backed **Metadata / Visual** modes while retaining the
+internal `keyword` and `embedding` values. Visual is the default and is not
+restricted to a checked-in vocabulary or autocomplete catalog.
 
 ## Run locally
 
@@ -42,8 +43,10 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). The example environment uses
-the keyless `catalogue-demo` mode, so no API key or local dataset is required.
+Open [http://localhost:3000/?searchMode=keyword](http://localhost:3000/?searchMode=keyword).
+The example environment uses the keyless `catalogue-demo` metadata preview, so
+no API key or local dataset is required for Metadata mode. Run the embedding
+service and set its server-only URL to use the default Visual mode locally.
 
 Enter concepts such as `horse, ship, train`. A comma inside one concept can be
 quoted: `"still life, fruit", flowers`. Up to five unique lines are supported.
@@ -98,9 +101,11 @@ The plotted value is `matching date weight / eligible date weight` for each
 bin. It measures the frequency of a term in Met catalogue metadata, not the
 visual prevalence of that concept in the images.
 
-## Build the public visual-concept catalog
+## Export an optional static visual-concept catalog
 
-The checked-in `config/concepts.json` is the editable source of stable concept
+This offline export remains available for experiments and archival releases; it
+is not the arbitrary Visual product path. The checked-in
+`config/concepts.json` is the editable source of stable concept
 IDs, canonical labels, categories, and aliases. Install the local search
 package into the environment that contains the pinned Transformers runtime,
 then export from an existing completed embedding bundle:
@@ -126,18 +131,20 @@ run, use `--concept-id horse` (repeatable) or `--limit 10`; those subset release
 remain inspectable under their fingerprinted release directory without replacing
 the published catalog.
 
-## Run the optional live embedding search path
+## Run arbitrary visual search
 
 The corpus and embedding builders are documented in
-[`pipeline/README.md`](pipeline/README.md). They use official Met metadata, a
-pinned clean image-URL table, and a pinned local SigLIP 2 revision. Artwork
+[`pipeline/README.md`](pipeline/README.md). They use pinned official museum
+metadata, rights-gated image URLs, and a pinned local SigLIP 2 revision. Artwork
 pixels can be streamed directly into bounded embedding batches and discarded;
-the durable bundle stores vectors, Met IDs, compact result metadata, dates,
+the durable bundle stores vectors, source IDs, compact result metadata, dates,
 rights, and input hashes rather than an image archive. No hosted inference API
 or end-user API key is involved. For Met URLs, the builder starts with the
 smaller `web-large` derivative and re-fetches the original whenever a decoded
 dimension falls below the model's 224 px input floor; the actual URL,
-dimensions, and response hash are retained as provenance.
+dimensions, and response hash are retained as provenance. For NGA, the adapter
+requests a bounded IIIF derivative (currently 1,024 px on the long edge with a
+256 px short-edge floor), never the museum original.
 
 ```bash
 python3 -m pip install -r pipeline/requirements.txt
@@ -145,9 +152,8 @@ python3 -m pipeline build --help
 python3 -m pipeline embed --help
 ```
 
-The static catalog is the production default. Start the persistent exact query
-service only for debugging, parity checks, filtered requests, or an optional
-long-tail fallback:
+Start one persistent exact query service. It loads the pinned text tower and
+memory-maps the already-completed image matrix; it never reruns image embedding:
 
 ```bash
 python3 -m pip install -e './service[siglip2,faiss]'
@@ -164,20 +170,35 @@ it does not retain a second full copy of the vector matrix. `--force-faiss` is
 available for a deployment whose memory and wheels have been benchmarked; on
 macOS, common FAISS and PyTorch wheels can also load conflicting OpenMP runtimes.
 
-To enable the toggle, run the keyword service on port 8765 and the embedding
-service on port 8766 at the same time, then configure:
+For the complete local product, run the keyword service on port 8765 and the
+embedding service on port 8766 at the same time, then configure:
 
 ```dotenv
 MNEMOSYNE_SEARCH_MODE=artifact
 MNEMOSYNE_KEYWORD_SEARCH_SERVICE_URL=http://127.0.0.1:8765/v1/search
 MNEMOSYNE_EMBEDDING_SEARCH_SERVICE_URL=http://127.0.0.1:8766/v1/search
+MNEMOSYNE_EMBEDDING_SEARCH_SERVICE_TOKEN=
+MNEMOSYNE_EMBEDDING_SEARCH_TIMEOUT_MS=60000
 ```
 
 The Next.js route sends `searchMode=keyword|embedding` to the selected service;
-model paths and service details stay server-side, and the end user supplies no
-API key. Local artifact images are served through the originating backend and a
-mode-aware same-origin web route. See [`service/README.md`](service/README.md)
-for the complete artifact contract and fixture-only startup command.
+the private-service token, model paths, and service details stay server-side,
+and the end user supplies no API key. Visual search and evidence remain
+unauthenticated same-origin `GET` requests in the browser. The web server adds
+the private-Space bearer token only to its internal `POST`; successful public
+Visual responses use a one-hour shared-cache policy, while failures remain
+`no-store`. Local artifact images are served through the originating backend
+and a mode-aware same-origin web route. See
+[`service/README.md`](service/README.md) for the complete artifact contract and
+fixture-only startup command.
+
+The production Hugging Face Docker Space, private artifact-bucket workflow, and
+safe allowlisted staging process are documented in
+[`deploy/huggingface/README.md`](deploy/huggingface/README.md). That deployment
+uses the merged 199,474-catalog-record Met and National Gallery of Art bundle,
+with a 199,474 × 768 float32 matrix and the exact pinned
+`google/siglip2-base-patch16-224` revision. The approximately 877 MB artifact
+bundle remains in the private artifact bucket rather than this repository.
 
 ## Verification
 
@@ -196,10 +217,10 @@ Met keyword frequency and evidence, and embedding-based independent series.
 
 ```mermaid
 flowchart LR
-  A["Official Met bulk data"] --> B["Canonical artwork metadata and dates"]
+  A["Official museum bulk data"] --> B["Canonical artwork metadata and dates"]
   B --> C["SQLite FTS5 keyword index"]
   U["Pinned, rights-gated image URLs"] --> V["Streamed SigLIP 2 image tower"]
-  V --> W["Float32 embeddings.npy keyed by Met ID"]
+  V --> W["Float32 embeddings.npy keyed by source ID"]
   B --> W
   Q["Comma-separated concepts"] --> R["Keyword / Embedding mode router"]
   R --> C
@@ -229,18 +250,42 @@ npm install
 npm run build:sites
 ```
 
-Static releases under `public/data/v1/releases/` receive long-lived immutable
-cache headers; only `public/data/v1/manifest.json` revalidates. On Sites, the
-browser reads those files through `/catalog-data/v1/`, a narrow Worker asset
-binding route that preserves ETags and applies the immutable browser policy.
-The local Next development server rewrites that prefix to the same files under
-`public/data/v1/`. The intended custom hostname is
-`mnemosyne.hannahgao.studio`. It is a separate subdomain: the portfolio Worker
-and DNS route for `hannahgao.studio` must not be changed. Do not deploy the
-generated `dist/server/wrangler.json` directly; Sites owns the real D1 resource
-wiring.
+Publish the frontend only after the private Space health and arbitrary-query
+checks in the deployment runbook pass. In the existing Sites project's runtime
+environment, preserve the working keyword URL and set:
+
+```dotenv
+MNEMOSYNE_SEARCH_MODE=artifact
+MNEMOSYNE_KEYWORD_SEARCH_SERVICE_URL=KEEP_THE_EXISTING_WORKING_VALUE
+MNEMOSYNE_EMBEDDING_SEARCH_SERVICE_URL=https://THE_PRIVATE_SPACE.hf.space/v1/search
+MNEMOSYNE_EMBEDDING_SEARCH_SERVICE_TOKEN=SET_AS_A_SERVER_SIDE_SECRET
+MNEMOSYNE_EMBEDDING_SEARCH_TIMEOUT_MS=60000
+```
+
+The Space token must be a separate fine-grained read token scoped to that
+private Space. Do not reuse the write-capable deployment token, rename either
+existing service environment variable, or expose the token through a
+`NEXT_PUBLIC_` variable.
+
+The outer Visual API responses emit the exact shared-cache policy
+`public, max-age=0, s-maxage=3600, stale-while-revalidate=86400`. Before launch,
+confirm that the Sites/Cloudflare deployment caches dynamic API responses by
+checking `CF-Cache-Status` twice for the same Visual URL and enable Workers
+caching or a narrow `/api/search` and `/api/evidence` cache rule if necessary.
+Before public launch, configure a Visual-only edge rate limit for
+`/api/search` and `/api/evidence`; the checked-in Worker does not currently
+provide one. The Python service's bounded request admission remains separate
+overload protection.
+
+The intended custom hostname is `mnemosyne.hannahgao.studio`. It is a separate
+subdomain: the portfolio Worker and DNS route for `hannahgao.studio` must not be
+changed. Do not deploy the generated `dist/server/wrangler.json` directly;
+Sites owns the real D1 resource wiring.
 
 ## Data attribution
+
+Production Visual search uses public-domain images and CC0 catalog data from
+The Metropolitan Museum of Art and the National Gallery of Art.
 
 The fallback uses the [Art Institute of Chicago public API](https://api.artic.edu/docs/)
 and its IIIF image service. Artifact builds retain source-record, metadata

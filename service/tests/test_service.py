@@ -5,9 +5,12 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+
 from mnemosyne_search.artifacts import ArtifactBundle
 from mnemosyne_search.cache import InMemorySeriesCache
 from mnemosyne_search.encoders import FixtureTextEncoder
+from mnemosyne_search.index import NumpyFlatIPIndex
 from mnemosyne_search.models import SearchRequest
 from mnemosyne_search.prompting import PromptEnsemble
 from mnemosyne_search.service import (
@@ -37,6 +40,70 @@ class CountingFixtureEncoder(FixtureTextEncoder):
         return super().encode(texts)
 
 
+class PromptAwareCountingEncoder(FixtureTextEncoder):
+    """Map production prompt variants back to deterministic fixture vectors."""
+
+    _PREFIXES = ("an artwork depicting ", "a work of art about ")
+
+    def __init__(self, path: Path) -> None:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        super().__init__(
+            payload["vectors"],
+            model_id=payload["modelId"],
+            model_version=payload["modelVersion"],
+        )
+        self.calls: list[list[str]] = []
+
+    def encode(self, texts):
+        prompts = list(texts)
+        self.calls.append(prompts)
+        canonical = []
+        for prompt in prompts:
+            canonical.append(
+                next(
+                    (
+                        prompt[len(prefix) :]
+                        for prefix in self._PREFIXES
+                        if prompt.startswith(prefix)
+                    ),
+                    prompt,
+                )
+            )
+        return super().encode(canonical)
+
+
+class RecordingExactIndex:
+    def __init__(self, embeddings: np.ndarray) -> None:
+        self._delegate = NumpyFlatIPIndex(embeddings)
+        self.backend = self._delegate.backend
+        self.search_calls: list[dict[str, object]] = []
+
+    def search(
+        self,
+        queries: np.ndarray,
+        k: int,
+        *,
+        eligible_indices: np.ndarray | None = None,
+    ):
+        self.search_calls.append(
+            {
+                "queries": np.asarray(queries, dtype=np.float32).copy(),
+                "k": k,
+                "eligible_indices": (
+                    None
+                    if eligible_indices is None
+                    else np.asarray(eligible_indices, dtype=np.int64).copy()
+                ),
+            }
+        )
+        return self._delegate.search(
+            queries, k, eligible_indices=eligible_indices
+        )
+
+    def score(self, query: np.ndarray, indices: np.ndarray) -> np.ndarray:
+        return self._delegate.score(query, indices)
+
+
 class SearchServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.artifacts = ArtifactBundle.load(FIXTURES)
@@ -55,6 +122,31 @@ class SearchServiceTests(unittest.TestCase):
             prefer_faiss=False,
             clock=lambda: datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
         )
+
+    def _prompt_service(
+        self,
+        *,
+        cache: InMemorySeriesCache | None = None,
+    ) -> tuple[SearchService, PromptAwareCountingEncoder, RecordingExactIndex]:
+        encoder = PromptAwareCountingEncoder(FIXTURES / "query-embeddings.json")
+        index = RecordingExactIndex(self.artifacts.embeddings)
+        service = SearchService(
+            self.artifacts,
+            encoder,
+            prompt_ensemble=PromptEnsemble(version="fixture-prompts-v3"),
+            config=SearchConfig(
+                percentile=0.1,
+                evidence_percentile=0.1,
+                minimum_denominator=1,
+                minimum_evidence_clusters=1,
+                minimum_bin_evidence_clusters=1,
+            ),
+            index=index,
+            cache=cache,
+            prefer_faiss=False,
+            clock=lambda: datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        )
+        return service, encoder, index
 
     def test_multi_series_response_uses_independent_score_qualified_sets(self) -> None:
         response = self.service.search(SearchRequest(query="horse, ship, Horse"))
@@ -93,6 +185,129 @@ class SearchServiceTests(unittest.TestCase):
         self.service.search(SearchRequest(query="horse, train"))
         self.assertEqual(self.encoder.calls, [["horse", "ship"], ["train"]])
 
+    def test_one_uncached_series_searches_combined_and_diagnostic_vectors_once(self) -> None:
+        service, encoder, index = self._prompt_service()
+
+        response = service.search(SearchRequest(query="horse"))
+
+        self.assertEqual(len(index.search_calls), 1)
+        search_call = index.search_calls[0]
+        self.assertEqual(search_call["k"], 1)
+        self.assertIsNone(search_call["eligible_indices"])
+        np.testing.assert_allclose(
+            search_call["queries"],
+            np.tile(
+                np.asarray([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+                (4, 1),
+            ),
+        )
+        self.assertEqual(
+            encoder.calls,
+            [
+                [
+                    "horse",
+                    "an artwork depicting horse",
+                    "a work of art about horse",
+                ]
+            ],
+        )
+        self.assertEqual(response["series"][0]["candidateK"], 1)
+        self.assertEqual(
+            response["series"][0]["diagnostics"]["promptTopKJaccard"],
+            1.0,
+        )
+        self.assertEqual(
+            response["selectedEvidence"]["slices"]["strongest"][0]["artworkId"],
+            "fixture-000",
+        )
+
+    def test_multi_series_one_scan_matches_independent_series_semantics(self) -> None:
+        service, encoder, index = self._prompt_service()
+
+        response = service.search(SearchRequest(query="horse, ship"))
+
+        self.assertEqual(len(index.search_calls), 1)
+        expected_vectors = np.asarray(
+            [
+                [1, 0, 0, 0],
+                [0, 1, 0, 0],
+                [1, 0, 0, 0],
+                [1, 0, 0, 0],
+                [1, 0, 0, 0],
+                [0, 1, 0, 0],
+                [0, 1, 0, 0],
+                [0, 1, 0, 0],
+            ],
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(
+            index.search_calls[0]["queries"], expected_vectors
+        )
+        self.assertEqual(
+            encoder.calls,
+            [
+                [
+                    "horse",
+                    "an artwork depicting horse",
+                    "a work of art about horse",
+                    "ship",
+                    "an artwork depicting ship",
+                    "a work of art about ship",
+                ]
+            ],
+        )
+
+        horse_service, _horse_encoder, _horse_index = self._prompt_service()
+        ship_service, _ship_encoder, _ship_index = self._prompt_service()
+        horse = horse_service.search(SearchRequest(query="horse"))
+        ship = ship_service.search(SearchRequest(query="ship"))
+
+        self.assertEqual(response["series"], [horse["series"][0], ship["series"][0]])
+        self.assertEqual(response["selectedEvidence"], horse["selectedEvidence"])
+        self.assertEqual(
+            [series["diagnostics"] for series in response["series"]],
+            [horse["series"][0]["diagnostics"], ship["series"][0]["diagnostics"]],
+        )
+
+    def test_mixed_cached_and_uncached_series_only_scans_the_missing_vectors(self) -> None:
+        service, encoder, index = self._prompt_service()
+        horse = service.search(SearchRequest(query="horse"))
+        index.search_calls.clear()
+
+        mixed = service.search(SearchRequest(query="horse, ship"))
+
+        self.assertEqual(len(index.search_calls), 1)
+        np.testing.assert_allclose(
+            index.search_calls[0]["queries"],
+            np.tile(
+                np.asarray([[0.0, 1.0, 0.0, 0.0]], dtype=np.float32),
+                (4, 1),
+            ),
+        )
+        self.assertEqual(mixed["series"][0], horse["series"][0])
+        self.assertEqual(
+            encoder.calls,
+            [
+                [
+                    "horse",
+                    "an artwork depicting horse",
+                    "a work of art about horse",
+                ],
+                [
+                    "ship",
+                    "an artwork depicting ship",
+                    "a work of art about ship",
+                ],
+            ],
+        )
+
+        index.search_calls.clear()
+        encoder_calls = list(encoder.calls)
+        repeated = service.search(SearchRequest(query="horse, ship"))
+        self.assertEqual(index.search_calls, [])
+        self.assertEqual(encoder.calls, encoder_calls)
+        self.assertEqual(repeated["series"], mixed["series"])
+
     def test_multi_series_response_survives_cache_smaller_than_query_count(self) -> None:
         service = SearchService(
             self.artifacts,
@@ -122,6 +337,10 @@ class SearchServiceTests(unittest.TestCase):
         )
 
         self.assertIs(service.cache, cache)
+
+    def test_cache_capacity_must_be_positive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "max_entries must be positive"):
+            InMemorySeriesCache(max_entries=0)
 
     def test_selects_requested_series_and_bin_for_evidence(self) -> None:
         parsed = self.service.search(SearchRequest(query="horse, train"))
@@ -215,7 +434,11 @@ class SearchServiceTests(unittest.TestCase):
             prompt_ensemble=PromptEnsemble(
                 version="fixture-prompts-v1", templates=("{query}",)
             ),
-            config=SearchConfig(minimum_evidence_score=1.0),
+            config=SearchConfig(
+                percentile=1.0,
+                evidence_percentile=0.1,
+                minimum_evidence_score=1.0,
+            ),
             prefer_faiss=False,
         )
 
@@ -228,6 +451,32 @@ class SearchServiceTests(unittest.TestCase):
         )
         self.assertIsNone(response["selectedEvidence"])
         self.assertEqual(response["series"][0]["points"], [])
+        nearest = response["series"][0]["nearestMatches"]
+        self.assertEqual(
+            [card["artworkId"] for card in nearest[:3]],
+            ["fixture-006", "fixture-008", "fixture-009"],
+        )
+        self.assertLessEqual(len(nearest), 20)
+        self.assertEqual(
+            [card["rawScore"] for card in nearest],
+            sorted(
+                [card["rawScore"] for card in nearest],
+                reverse=True,
+            ),
+        )
+        self.assertTrue(all(not card["contributor"] for card in nearest))
+        self.assertTrue(
+            all(card["contributionWeight"] == 0.0 for card in nearest)
+        )
+        self.assertEqual(
+            len({card["visualClusterId"] for card in nearest}), len(nearest)
+        )
+
+    def test_score_qualified_series_omits_exploratory_nearest_matches(self) -> None:
+        response = self.service.search(SearchRequest(query="horse"))
+
+        self.assertGreater(response["series"][0]["k"], 0)
+        self.assertNotIn("nearestMatches", response["series"][0])
 
     def test_rejects_evidence_selection_for_an_unplotted_bin(self) -> None:
         response = self.service.search(
@@ -257,6 +506,7 @@ class SearchServiceTests(unittest.TestCase):
             response["series"][0]["diagnostics"]["reasons"][-1],
         )
         self.assertIsNone(response["selectedEvidence"])
+        self.assertNotIn("nearestMatches", response["series"][0])
 
     def test_series_distinguishes_suppressed_positive_bins_from_honest_zeros(self) -> None:
         service = SearchService(

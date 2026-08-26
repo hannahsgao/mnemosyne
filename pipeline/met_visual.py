@@ -19,6 +19,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
+from . import __version__
 from .build import CANONICAL_FIELDS, CorpusBuildError, sha256_file
 from .met import MET_CC0_URI
 
@@ -532,6 +533,7 @@ def prepare_met_visual_subset(
 
     manifest: dict[str, object] = {
         "schema_version": VISUAL_SUBSET_SCHEMA_VERSION,
+        "builder_version": __version__,
         "selection": {
             "algorithm": "sha256-seeded-uniform-sample-with-fallbacks",
             "seed": seed,

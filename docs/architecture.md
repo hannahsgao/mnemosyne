@@ -11,7 +11,7 @@ A search may contain one to five comma-separated concepts, such as `horse, ship,
 
 The evidence trail is not an optional gallery. It is how a user audits whether a line represents the concept they meant.
 
-The product measures a versioned corpus of digitized museum objects, not all art that existed in a period. Corpus composition and coverage are part of every result. End users never provide a museum or model API key.
+The product measures versioned source catalog records linked to physical-object IDs, not all art that existed in a period. Corpus composition and coverage are part of every result. End users never provide a museum or model API key.
 
 ## Production data flow
 
@@ -31,9 +31,13 @@ ArtiFact is not automatically the production source of truth:
 
 #### Production corpus
 
-Build source adapters for official bulk releases from the [Met](https://github.com/metmuseum/openaccess), [Art Institute of Chicago](https://api.artic.edu/docs/), and [Rijksmuseum](https://data.rijksmuseum.nl/). This is scheduled ETL from published data, not an HTML crawl. Retain source payloads and produce a named snapshot such as `met-aic-rijks-2026-08-v1` with source URLs, retrieval timestamps, checksums, adapter versions, and row counts.
+Build source adapters for official bulk releases from the [Met](https://github.com/metmuseum/openaccess), [National Gallery of Art](https://github.com/NationalGalleryOfArt/opendata), [Art Institute of Chicago](https://api.artic.edu/docs/), and [Rijksmuseum](https://data.rijksmuseum.nl/). This is scheduled ETL from published data, not an HTML crawl. Retain source payloads and produce a named snapshot such as `met-nga-aic-rijks-2026-08-v1` with source URLs, retrieval timestamps, checksums, adapter versions, and row counts.
 
-Store one row per physical museum object and group related records instead of deleting them during deduplication:
+Store one row per searchable source catalog record and give every row a stable
+`physical_object_id`. Sources such as the NGA can publish inseparable child
+records for one physical object; retain those records for search while grouping
+them through the official association table instead of deleting them during
+deduplication:
 
 ```text
 artwork_id, physical_object_id, visual_cluster_id,
@@ -45,7 +49,12 @@ metadata_license, image_rights_uri, credit_line, public_domain,
 image_available, image_url, image_sha256, image_width, image_height, embedding_offset
 ```
 
-Keep the raw source payload beside the canonical table. A `visual_cluster_id` may join duplicate photographs, editions, or depictions while preserving the distinction between separate physical objects. The default counting unit must be stated in the metric; the UI can later offer “museum objects” and “unique visual clusters” as separate corpus views.
+Keep the raw source payload beside the canonical table. A `visual_cluster_id`
+may join duplicate photographs, editions, or depictions while preserving the
+distinction between separate physical objects. The default counting unit must
+be stated in the metric: a mixed source snapshot that retains child records is
+honestly a `catalog-record` view, while derived `physical-object` and
+`visual-cluster` views can aggregate those explicit identifiers later.
 
 Only include images whose terms permit the intended download, embedding, storage, and display behavior. Public-domain-only images will underrepresent modern and contemporary art, so surface rights and digitization coverage by period rather than interpreting a late-period decline as an art-historical fact.
 
@@ -77,7 +86,7 @@ During the one-time corpus build, create an immutable SQLite FTS5 index over
 title, tags, artist, culture, medium, object type, classification, period,
 dynasty, geography, and department. For each series query `j`, retrieve matching
 row IDs from this local index and aggregate them against the same frozen corpus.
-Broad catalogue search is the default; title-only and tag-only modes remain
+Broad catalogue search is the Metadata-mode default; title-only and tag-only modes remain
 explicit diagnostic alternatives.
 
 Using the same precomputed date matrix `W` and denominator `D[b]`:
@@ -251,12 +260,14 @@ contribution weight, and rights status. The timeline legend identifies every
 series, supports hiding or revealing lines, and makes the selected line explicit
 before showing evidence.
 
-### 6. Static production catalog
+### 6. Optional static export
 
-Common public visual concepts are computed offline with the same
-`SearchService` semantics. The exporter batches combined and prompt vectors in
-one bounded exact matrix pass, then serializes the live series result without
-replacing concentration lift with centroids or mean similarity.
+The exporter can compute a finite archival or experimental catalog offline with
+the same `SearchService` semantics. It is not used by the production Visual
+input, which must accept arbitrary phrases and execute the persistent query
+service. The exporter batches combined and prompt vectors in one bounded exact
+matrix pass, then serializes the live series result without replacing
+concentration lift with centroids or mean similarity.
 
 The public layout is content-addressed:
 
@@ -277,11 +288,9 @@ metadata deduplicated across periods. It is fetched only after period
 selection. This keeps a 5,000-concept catalog near 10,000 static files rather
 than multiplying concepts by all 1,703 bins.
 
-Exact labels and aliases resolve locally and always display the canonical
-concept. An alias does not pretend to be a separately encoded query. Metadata
-keyword search remains a distinct D1-backed mode. Unsupported static filters
-must use an explicitly labelled live exact path or remain unavailable; the
-default-corpus static result must never be presented as filtered.
+Static labels and aliases resolve locally only for consumers of that optional
+export. They never constrain production Visual queries. Metadata keyword search
+remains a distinct D1-backed mode.
 
 ## Service boundaries
 
@@ -291,11 +300,10 @@ Met metadata      -> local SQLite FTS5 -> sparse date aggregation
 Permitted image URLs -> streamed embedding build -> float32 matrix + optional FAISS index
 Canonical dates   -> date build -> sparse weights + denominators
 
-Concept source -> pinned text tower + completed image matrix -> immutable CDN catalog
-Public concept query -> local alias resolution -> compact static series
-                     -> lazy sparse evidence bundle
 Metadata query -> Cloudflare Worker + D1 FTS5 -> frequency series + evidence
-Optional novel/filtered query -> persistent text tower -> exact matrix retrieval
+Arbitrary Visual query -> same-origin web proxy -> private persistent text tower
+                       -> exact local matrix retrieval -> timeline + evidence
+Optional catalog export -> pinned text tower + completed matrix -> immutable files
 ```
 
 The prototype can keep the `/api/search` route, but the production response
@@ -314,7 +322,7 @@ artwork block.
 | Date weights | SciPy sparse matrices | Custom compact representation only if needed |
 | Image-text model | Transformers + SigLIP 2 base | A better checkpoint only after benchmark improvement |
 | Request-time text inference | Reference Transformers implementation | ONNX Runtime or quantized service after parity tests |
-| Exact vector search | FAISS `IndexFlatIP` | HNSW/IVF/PQ after recall and trace-distortion tests |
+| Exact vector search | Memory-mapped NumPy/BLAS | FAISS `IndexFlatIP` only after memory/runtime measurement; approximate indexes after recall and trace-distortion tests |
 | Reference scoring | Memory-mapped NumPy/BLAS | GPU batching for offline experiments |
 | Dataset review | FiftyOne | Custom review and annotation queues |
 | Bulk permitted images | Institutional IIIF and manifest-driven `img2dataset` | Managed object-storage pipeline |

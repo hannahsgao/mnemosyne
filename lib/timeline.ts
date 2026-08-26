@@ -1,9 +1,40 @@
-import type { ChartSelection, SearchResponse, SearchSeries, SeriesPoint, TimeBin } from "./types";
+import type {
+  ChartSelection,
+  MetricMetadata,
+  SearchResponse,
+  SearchSeries,
+  SeriesPoint,
+  TimeBin,
+} from "./types";
 
 export type TimelineViewport = {
   start: number;
   end: number;
 };
+
+function formatBaselinePercent(fraction: number) {
+  return `${Number((fraction * 100).toPrecision(4))}%`;
+}
+
+/** Explain the exact metric shown by the timeline without implying historical popularity. */
+export function describeTimelineMetric(metric: MetricMetadata) {
+  if (metric.unit === "lift") {
+    const baseline = metric.percentile === null
+      ? null
+      : formatBaselinePercent(metric.percentile);
+    return [
+      "Only the strongest model matches are included.",
+      `For each period, their matching date weight is divided by all eligible date weight, then by ${baseline ? `a fixed ${baseline} baseline` : "the configured baseline"}.`,
+      baseline ? `1× means a ${baseline} share.` : "1× equals that baseline.",
+      "Date ranges are split across periods, and each period has a different denominator, so a high point can be supported by only a few works.",
+      "This measures concentration in this corpus, not historical popularity or a raw count.",
+    ].join(" ");
+  }
+  if (metric.unit === "frequency") {
+    return "For each period, matching date weight is divided by all eligible date weight. Date ranges are split across periods, and each period has a different denominator, so the percentage does not rise in lockstep with the raw matching-record count. This measures frequency in catalogue metadata, not historical popularity.";
+  }
+  return "Each point is the number of returned records in that period divided by the largest period count for this search. 100% marks the busiest period in the current result sample, not collection-wide frequency or historical popularity; with a small sample, even a few records can reach 100%.";
+}
 
 export function decadeStart(year: number) {
   return Math.floor(year / 10) * 10;

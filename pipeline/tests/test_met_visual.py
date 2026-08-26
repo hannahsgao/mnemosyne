@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from pipeline import __version__
 from pipeline.met_visual import (
     _cacheable_availability,
     _optimized_image_url,
@@ -145,6 +146,7 @@ class MetVisualSubsetTests(unittest.TestCase):
             self.assertTrue(all(row["public_domain"] == "True" for row in rows))
             self.assertTrue(all(row["image_use_permitted"] == "True" for row in rows))
             self.assertTrue(all((output.parent / row["image_path"]).is_file() for row in rows))
+            self.assertEqual(manifest["builder_version"], __version__)
             self.assertEqual(manifest["selection"]["prepared_rows"], 2)
             self.assertTrue(output.with_suffix(".manifest.json").is_file())
 

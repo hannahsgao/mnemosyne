@@ -7,12 +7,18 @@ import json
 from pathlib import Path
 import sys
 
-from .build import CorpusBuildError, build_corpus
+from .build import CorpusBuildError, SUPPORTED_COUNTING_UNITS, build_corpus
 from .dates import DateConfig
 from .embedded_corpus import derive_embedded_corpus
 from .embeddings import DeterministicTestEncoder, Siglip2LocalEncoder, build_embedding_index
 from .met import MET_API_BASE, build_met_corpus
 from .met_visual import DEFAULT_MAX_IMAGE_BYTES, prepare_met_visual_subset
+from .merge import merge_embedding_bundles
+from .nga_visual import (
+    DEFAULT_MAX_DIMENSION as NGA_DEFAULT_MAX_DIMENSION,
+    DEFAULT_MIN_SHORT_SIDE as NGA_DEFAULT_MIN_SHORT_SIDE,
+    prepare_nga_visual_subset,
+)
 from .repack import repack_embedded_bundle
 from .export_concepts import add_arguments as add_export_concept_arguments
 
@@ -31,6 +37,17 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument(
         "--source-url",
         default="https://huggingface.co/datasets/deem-data/ArtiFact",
+    )
+    build.add_argument(
+        "--source-kind",
+        default="artifact-clean-local-csv",
+        help="source adapter/provenance kind recorded in the build manifest",
+    )
+    build.add_argument(
+        "--counting-unit",
+        default="physical-object",
+        choices=sorted(SUPPORTED_COUNTING_UNITS),
+        help="unit represented by one canonical row (for example catalog-record)",
     )
 
     build_met = subparsers.add_parser(
@@ -149,6 +166,61 @@ def _parser() -> argparse.ArgumentParser:
         help="skip the resumable header-only URL availability check",
     )
 
+    prepare_nga = subparsers.add_parser(
+        "prepare-nga-visual",
+        help="prepare a deterministic CC0 NGA primary-image subset for embedding",
+    )
+    prepare_nga.add_argument(
+        "--objects", type=Path, required=True, help="official NGA objects.csv"
+    )
+    prepare_nga.add_argument(
+        "--published-images",
+        type=Path,
+        required=True,
+        help="official NGA published_images.csv",
+    )
+    prepare_nga.add_argument(
+        "--object-associations",
+        type=Path,
+        required=True,
+        help="official NGA object_associations.csv used for inseparable-object grouping",
+    )
+    prepare_nga.add_argument("--output-csv", type=Path, required=True)
+    prepare_nga.add_argument(
+        "--source-revision",
+        required=True,
+        help="pinned 40-character NationalGalleryOfArt/opendata commit",
+    )
+    prepare_nga.add_argument(
+        "--sample-size",
+        type=int,
+        default=0,
+        help="deterministic sample size; 0 prepares every eligible artwork",
+    )
+    prepare_nga.add_argument(
+        "--seed", default="nga-open-access-primary-visual-v1"
+    )
+    prepare_nga.add_argument("--workers", type=int, default=16)
+    prepare_nga.add_argument(
+        "--max-dimension", type=int, default=NGA_DEFAULT_MAX_DIMENSION
+    )
+    prepare_nga.add_argument(
+        "--min-short-side", type=int, default=NGA_DEFAULT_MIN_SHORT_SIDE
+    )
+    prepare_nga.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help="skip the resumable header-only IIIF availability check",
+    )
+    prepare_nga.add_argument(
+        "--include-undated",
+        action="store_true",
+        help=(
+            "include image-eligible objects without trustworthy timeline bounds; "
+            "excluded by default because NGA numeric dates can be artist lifespans"
+        ),
+    )
+
     derive = subparsers.add_parser(
         "derive-embedded-corpus",
         help="derive a hash-identified canonical CSV from an embedding bundle",
@@ -174,6 +246,25 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="copy an aligned existing exact FAISS index after validating it",
     )
+
+    merge = subparsers.add_parser(
+        "merge-embedded-bundles",
+        help="merge compatible completed embedding bundles without re-embedding",
+    )
+    merge.add_argument(
+        "--bundle",
+        type=Path,
+        action="append",
+        required=True,
+        dest="bundles",
+        help="completed embedding bundle; repeat at least twice",
+    )
+    merge.add_argument("--output", type=Path, required=True)
+    merge.add_argument("--corpus-version", required=True)
+    merge.add_argument(
+        "--corpus-label",
+        help="optional user-facing label recorded in both merged manifests",
+    )
     export_concepts = subparsers.add_parser(
         "export-concepts",
         help="export compact static concept timelines from completed embeddings",
@@ -194,6 +285,8 @@ def main(argv: list[str] | None = None) -> int:
                 source_url=args.source_url,
                 retrieved_at=args.retrieved_at,
                 metadata_license=args.metadata_license,
+                source_kind=args.source_kind,
+                counting_unit=args.counting_unit,
                 date_config=DateConfig(
                     bin_size=args.bin_size,
                     circa_years=args.circa_years,
@@ -276,6 +369,28 @@ def main(argv: list[str] | None = None) -> int:
                     flush=True,
                 ),
             )
+        elif args.command == "prepare-nga-visual":
+            manifest = prepare_nga_visual_subset(
+                args.objects,
+                args.published_images,
+                args.output_csv,
+                object_associations_csv=args.object_associations,
+                source_revision=args.source_revision,
+                sample_size=args.sample_size,
+                seed=args.seed,
+                workers=args.workers,
+                max_dimension=args.max_dimension,
+                min_short_side=args.min_short_side,
+                preflight=not args.no_preflight,
+                include_undated=args.include_undated,
+                progress=lambda examined, prepared, total: print(
+                    f"examined={examined} prepared={prepared}/"
+                    f"{args.sample_size or total} "
+                    f"eligible={total}",
+                    file=sys.stderr,
+                    flush=True,
+                ),
+            )
         elif args.command == "derive-embedded-corpus":
             manifest = derive_embedded_corpus(
                 args.bundle,
@@ -288,6 +403,13 @@ def main(argv: list[str] | None = None) -> int:
                 args.corpus_dir,
                 args.output,
                 copy_faiss=args.copy_faiss,
+            )
+        elif args.command == "merge-embedded-bundles":
+            manifest = merge_embedding_bundles(
+                args.bundles,
+                args.output,
+                corpus_version=args.corpus_version,
+                corpus_label=args.corpus_label,
             )
         elif args.command == "export-concepts":
             from .export_concepts import run as run_export_concepts

@@ -27,6 +27,7 @@ from .dates import (
 
 
 BUILD_SCHEMA_VERSION = "mnemosyne-corpus-build/v1"
+SUPPORTED_COUNTING_UNITS = frozenset({"physical-object", "catalog-record"})
 
 CANONICAL_FIELDS = (
     "artwork_id",
@@ -75,6 +76,7 @@ IMAGE_MANIFEST_FIELDS = (
     "public_domain",
     "permission_status",
 )
+IMAGE_INPUT_POLICY_FIELD = "image_input_policy"
 
 
 class CorpusBuildError(ValueError):
@@ -354,18 +356,20 @@ def _image_rows(raw_rows: list[dict[str, str]], canonical_rows: list[dict[str, o
             status = "explicitly-permitted"
         else:
             status = "unreviewed"
-        output.append(
-            {
-                "artwork_id": canonical["artwork_id"],
-                "image_available": canonical["image_available"],
-                "image_url": canonical["image_url"],
-                "image_path": _first(raw, "image_path"),
-                "image_sha256": canonical["image_sha256"],
-                "image_rights_uri": rights_uri,
-                "public_domain": public_domain,
-                "permission_status": status,
-            }
-        )
+        image_row = {
+            "artwork_id": canonical["artwork_id"],
+            "image_available": canonical["image_available"],
+            "image_url": canonical["image_url"],
+            "image_path": _first(raw, "image_path"),
+            "image_sha256": canonical["image_sha256"],
+            "image_rights_uri": rights_uri,
+            "public_domain": public_domain,
+            "permission_status": status,
+        }
+        image_input_policy = _first(raw, IMAGE_INPUT_POLICY_FIELD)
+        if image_input_policy:
+            image_row[IMAGE_INPUT_POLICY_FIELD] = image_input_policy
+        output.append(image_row)
     return output
 
 
@@ -397,6 +401,7 @@ def build_corpus(
     input_row_count: int | None = None,
     source_counts: Mapping[str, int] | None = None,
     source_metadata: Mapping[str, object] | None = None,
+    counting_unit: str = "physical-object",
 ) -> dict[str, object]:
     """Build one immutable artifact directory from a local clean-split CSV."""
 
@@ -408,9 +413,17 @@ def build_corpus(
         raise CorpusBuildError("corpus_version is required")
     if not source_revision.strip():
         raise CorpusBuildError("source_revision is required")
+    normalized_counting_unit = counting_unit.strip()
+    if normalized_counting_unit not in SUPPORTED_COUNTING_UNITS:
+        raise CorpusBuildError(
+            "counting_unit must be one of: "
+            + ", ".join(sorted(SUPPORTED_COUNTING_UNITS))
+        )
     if not source.is_file():
         raise CorpusBuildError(f"input CSV does not exist: {source}")
-    if destination.exists() and any(destination.iterdir()):
+    if destination.exists() and (
+        not destination.is_dir() or any(destination.iterdir())
+    ):
         raise CorpusBuildError(f"output directory must be absent or empty: {destination}")
 
     fields, raw_rows = _read_csv(source)
@@ -439,8 +452,12 @@ def build_corpus(
     for index, row in enumerate(canonical_rows):
         row["embedding_offset"] = index
 
-    destination.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".mnemosyne-build-", dir=destination))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{destination.name}.staging-", dir=destination.parent
+        )
+    )
     try:
         source_payload_dir = staging / "source-payloads"
         source_payload_dir.mkdir()
@@ -467,10 +484,15 @@ def build_corpus(
             raise CorpusBuildError("--require-parquet was set but PyArrow is not installed")
 
         image_rows = _image_rows(sorted_raw, canonical_rows)
+        image_manifest_fields = IMAGE_MANIFEST_FIELDS
+        if any(row.get(IMAGE_INPUT_POLICY_FIELD) for row in image_rows):
+            image_manifest_fields = (*IMAGE_MANIFEST_FIELDS, IMAGE_INPUT_POLICY_FIELD)
         images_csv = staging / "images.manifest.csv"
-        _write_csv(images_csv, IMAGE_MANIFEST_FIELDS, image_rows)
+        _write_csv(images_csv, image_manifest_fields, image_rows)
         images_parquet = staging / "images.manifest.parquet"
-        wrote_images_parquet = _write_parquet_if_available(images_parquet, IMAGE_MANIFEST_FIELDS, image_rows)
+        wrote_images_parquet = _write_parquet_if_available(
+            images_parquet, image_manifest_fields, image_rows
+        )
 
         bins = make_bins(dates, config)
         weights_path = staging / "date-weights.npz"
@@ -540,7 +562,7 @@ def build_corpus(
                 "id": corpus_version,
                 "version": corpus_version,
                 "count": len(canonical_rows),
-                "countingUnit": "physical-object",
+                "countingUnit": normalized_counting_unit,
             },
             "source": {
                 "kind": source_kind,
@@ -560,7 +582,7 @@ def build_corpus(
                 **dict(source_metadata or {}),
             },
             "date_rules": {"version": DATE_RULES_VERSION, **asdict(config)},
-            "counting_unit": "physical-object",
+            "counting_unit": normalized_counting_unit,
             "counts": {
                 "input_rows": input_row_count if input_row_count is not None else len(raw_rows),
                 "canonical_rows": len(canonical_rows),
@@ -598,8 +620,18 @@ def build_corpus(
             encoding="utf-8",
         )
 
-        for child in sorted(staging.iterdir(), key=lambda path: path.name):
-            child.replace(destination / child.name)
+        if destination.exists() and (
+            not destination.is_dir() or any(destination.iterdir())
+        ):
+            raise CorpusBuildError(
+                f"output directory changed during publication: {destination}"
+            )
+        try:
+            staging.replace(destination)
+        except OSError as exc:
+            raise CorpusBuildError(
+                f"could not atomically publish output directory: {destination}"
+            ) from exc
     finally:
         if staging.exists():
             shutil.rmtree(staging)

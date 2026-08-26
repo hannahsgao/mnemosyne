@@ -11,7 +11,15 @@ from typing import Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
 from . import __version__
-from .build import CANONICAL_FIELDS, CorpusBuildError, sha256_file
+from .build import BUILD_SCHEMA_VERSION, CANONICAL_FIELDS, CorpusBuildError, sha256_file
+from .embeddings import EMBED_SCHEMA_VERSION
+from .repack import (
+    _declared_path,
+    _manifest_count,
+    _read_manifest,
+    _require_declared,
+    _verify_artifacts,
+)
 
 
 DERIVATION_SCHEMA_VERSION = "mnemosyne-embedded-corpus-derivation/v1"
@@ -20,7 +28,6 @@ KNOWN_MET_PLACEHOLDERS = (
     "Images-Restricted.jpg",
     "image-number-only.jpg",
 )
-_PLACEHOLDER_BY_CASEFOLD = {name.casefold(): name for name in KNOWN_MET_PLACEHOLDERS}
 OUTPUT_FIELDS = (
     *CANONICAL_FIELDS,
     "image_path",
@@ -31,6 +38,21 @@ OUTPUT_FIELDS = (
     "input_width",
     "input_height",
     "input_policy",
+    "image_input_policy",
+)
+_REQUIRED_MODEL_FILES = (
+    "metadata",
+    "embeddings",
+    "dateWeights",
+    "binDenominators",
+    "imageManifest",
+    "embeddedImages",
+)
+_CORPUS_DEPLOYED_FILES = (
+    "metadata",
+    "dateWeights",
+    "binDenominators",
+    "imageManifest",
 )
 
 
@@ -62,6 +84,25 @@ def _rows_by_id(rows: Sequence[dict[str, str]], source_name: str) -> dict[str, d
     return indexed
 
 
+def _ordered_artwork_ids(
+    rows: Sequence[Mapping[str, str]], source_name: str
+) -> list[str]:
+    artwork_ids: list[str] = []
+    for index, row in enumerate(rows):
+        try:
+            offset = int(row.get("embedding_offset", ""))
+        except (TypeError, ValueError) as exc:
+            raise CorpusBuildError(
+                f"{source_name} row {index + 2}: embedding_offset is not an integer"
+            ) from exc
+        if offset != index:
+            raise CorpusBuildError(
+                f"{source_name} embedding_offset values must be contiguous from zero"
+            )
+        artwork_ids.append(row.get("artwork_id", "").strip())
+    return artwork_ids
+
+
 def _basename(value: str) -> str:
     if not value.strip():
         return ""
@@ -70,7 +111,9 @@ def _basename(value: str) -> str:
 
 
 def _placeholder_name(
-    corpus_row: Mapping[str, str], embedded_row: Mapping[str, str]
+    corpus_row: Mapping[str, str],
+    embedded_row: Mapping[str, str],
+    placeholder_by_casefold: Mapping[str, str],
 ) -> str | None:
     for field, row in (
         ("input_source", embedded_row),
@@ -79,10 +122,42 @@ def _placeholder_name(
         ("image_path", embedded_row),
     ):
         basename = _basename(row.get(field, ""))
-        known = _PLACEHOLDER_BY_CASEFOLD.get(basename.casefold())
+        known = placeholder_by_casefold.get(basename.casefold())
         if known:
             return known
     return None
+
+
+def _placeholder_policy(
+    visual_payload: Mapping[str, object],
+) -> tuple[tuple[str, ...], str]:
+    if "placeholder_basenames" not in visual_payload:
+        # Backward compatibility for already-published Met preflight manifests.
+        return KNOWN_MET_PLACEHOLDERS, "legacy-met-default"
+
+    declared = visual_payload["placeholder_basenames"]
+    if not isinstance(declared, list):
+        raise CorpusBuildError("visual preflight placeholder_basenames must be a list")
+    placeholders: list[str] = []
+    seen: set[str] = set()
+    for index, value in enumerate(declared):
+        if not isinstance(value, str) or not value.strip():
+            raise CorpusBuildError(
+                f"visual preflight placeholder_basenames[{index}] must be a non-empty string"
+            )
+        name = value.strip()
+        if _basename(name) != name:
+            raise CorpusBuildError(
+                f"visual preflight placeholder_basenames[{index}] must be a basename"
+            )
+        folded = name.casefold()
+        if folded in seen:
+            raise CorpusBuildError(
+                "visual preflight placeholder_basenames contains a case-insensitive duplicate"
+            )
+        seen.add(folded)
+        placeholders.append(name)
+    return tuple(placeholders), "visual-manifest"
 
 
 def _validated_sha256(value: str, artwork_id: str) -> str:
@@ -118,6 +193,215 @@ def _source_entry(path: Path) -> dict[str, object]:
     }
 
 
+def _sha256_digest(value: object, label: str) -> str:
+    digest = str(value or "").strip().lower()
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise CorpusBuildError(f"{label} must be a 64-character hex digest")
+    return digest
+
+
+def _validate_corpus_declarations(
+    bundle: Path,
+    corpus_manifest: Mapping[str, object],
+    deployed: Mapping[str, Path],
+) -> None:
+    files = corpus_manifest.get("files")
+    if not isinstance(files, dict):
+        raise CorpusBuildError("corpus build manifest files must be an object")
+    entries = corpus_manifest.get("artifacts")
+    if not isinstance(entries, list):
+        raise CorpusBuildError("corpus build manifest artifacts must be a list")
+    by_path: dict[str, Mapping[str, object]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise CorpusBuildError("corpus build artifact entries must be objects")
+        raw_path = str(entry.get("path") or "")
+        if not raw_path or raw_path in by_path:
+            raise CorpusBuildError(
+                f"corpus build artifact path is invalid or duplicated: {raw_path!r}"
+            )
+        _sha256_digest(entry.get("sha256"), f"corpus build artifact {raw_path} sha256")
+        try:
+            declared_bytes = int(entry["bytes"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CorpusBuildError(
+                f"corpus build artifact byte count is invalid: {raw_path}"
+            ) from exc
+        if declared_bytes < 0:
+            raise CorpusBuildError(
+                f"corpus build artifact byte count is invalid: {raw_path}"
+            )
+        by_path[raw_path] = entry
+
+    for key, actual_path in deployed.items():
+        relative = actual_path.relative_to(bundle).as_posix()
+        if files.get(key) != relative:
+            raise CorpusBuildError(
+                f"corpus build manifest does not declare deployed {key}: {relative}"
+            )
+        entry = by_path.get(relative)
+        if entry is None:
+            raise CorpusBuildError(
+                f"corpus build manifest does not checksum deployed {key}: {relative}"
+            )
+        if (
+            int(entry["bytes"]) != actual_path.stat().st_size
+            or _sha256_digest(
+                entry.get("sha256"), f"corpus build artifact {relative} sha256"
+            )
+            != sha256_file(actual_path)
+        ):
+            raise CorpusBuildError(
+                f"deployed artifact differs from corpus build manifest: {relative}"
+            )
+
+
+def _validate_matrix_declaration(
+    path: Path, model_manifest: Mapping[str, object], expected_rows: int
+) -> None:
+    try:
+        import numpy as np
+    except ImportError as exc:  # pragma: no cover - required by the pipeline runtime
+        raise CorpusBuildError("embedding derivation requires NumPy") from exc
+    try:
+        matrix = np.load(path, mmap_mode="r", allow_pickle=False)
+    except (OSError, ValueError) as exc:
+        raise CorpusBuildError(f"embedding matrix is not a valid NPY file: {path}") from exc
+    if matrix.ndim != 2 or matrix.shape[0] != expected_rows or matrix.shape[1] < 1:
+        raise CorpusBuildError(
+            f"embedding matrix shape {matrix.shape} does not match {expected_rows} corpus rows"
+        )
+    declared = model_manifest.get("matrix")
+    if not isinstance(declared, dict) or (
+        declared.get("rows") != int(matrix.shape[0])
+        or declared.get("dimensions") != int(matrix.shape[1])
+        or declared.get("dtype") != str(matrix.dtype)
+        or declared.get("l2_normalized") is not True
+        or declared.get("row_order") != "corpus.csv embedding_offset"
+    ):
+        raise CorpusBuildError("model manifest does not match its embedding matrix")
+
+
+def _validated_embedding_bundle(
+    bundle: Path,
+) -> tuple[dict[str, object], dict[str, object], dict[str, Path]]:
+    if not bundle.is_dir():
+        raise CorpusBuildError(f"embedding bundle is not a directory: {bundle}")
+    model_manifest_path = bundle / "model-manifest.json"
+    model_manifest = _read_manifest(model_manifest_path, EMBED_SCHEMA_VERSION)
+    artifacts = _verify_artifacts(bundle, model_manifest)
+    declared = {
+        key: _require_declared(bundle, model_manifest, artifacts, key)
+        for key in _REQUIRED_MODEL_FILES
+    }
+
+    files = model_manifest.get("files")
+    if not isinstance(files, dict):
+        raise CorpusBuildError("model manifest files must be an object")
+    numpy_index = _declared_path(bundle, files.get("numpyIndex"), "numpyIndex")
+    if numpy_index != declared["embeddings"]:
+        raise CorpusBuildError("model manifest numpyIndex must match embeddings")
+    faiss_index = files.get("faissIndex")
+    if faiss_index:
+        faiss_path = _declared_path(bundle, faiss_index, "faissIndex")
+        if faiss_path.relative_to(bundle).as_posix() not in artifacts:
+            raise CorpusBuildError("model faissIndex is not covered by artifact checksums")
+    source_provenance = files.get("sourceProvenance", [])
+    if not isinstance(source_provenance, list):
+        raise CorpusBuildError("model sourceProvenance must be a list")
+    for raw_path in source_provenance:
+        path = _declared_path(bundle, raw_path, "a source provenance file")
+        if path.relative_to(bundle).as_posix() not in artifacts:
+            raise CorpusBuildError(
+                "model source provenance is not covered by artifact checksums"
+            )
+
+    corpus_manifest_path = bundle / "corpus-build-manifest.json"
+    corpus_manifest_relative = corpus_manifest_path.relative_to(bundle).as_posix()
+    if corpus_manifest_relative not in artifacts:
+        raise CorpusBuildError(
+            "model manifest does not checksum corpus-build-manifest.json"
+        )
+    corpus_manifest = _read_manifest(corpus_manifest_path, BUILD_SCHEMA_VERSION)
+    if _sha256_digest(
+        model_manifest.get("corpus_manifest_sha256"),
+        "model corpus_manifest_sha256",
+    ) != sha256_file(corpus_manifest_path):
+        raise CorpusBuildError("model manifest has the wrong corpus manifest checksum")
+    if model_manifest.get("corpus") != corpus_manifest.get("corpus"):
+        raise CorpusBuildError("model and corpus manifests have different corpus identities")
+    expected_rows = _manifest_count(model_manifest, "model")
+    if _manifest_count(corpus_manifest, "corpus build") != expected_rows:
+        raise CorpusBuildError("model and corpus manifests have different row counts")
+
+    model = model_manifest.get("model")
+    model_id = str(model.get("id") or "").strip() if isinstance(model, dict) else ""
+    model_revision = (
+        str(model.get("revision") or "").strip() if isinstance(model, dict) else ""
+    )
+    if (
+        not isinstance(model, dict)
+        or not model_id
+        or not model_revision
+        or not isinstance(model.get("settings"), dict)
+    ):
+        raise CorpusBuildError("model manifest has an invalid model identity or settings")
+    index = model_manifest.get("index")
+    if not isinstance(index, dict) or (
+        index.get("metric") != "inner-product-on-l2-normalized-vectors"
+        or index.get("exact") is not True
+    ):
+        raise CorpusBuildError("embedding bundle does not declare the exact cosine contract")
+    _validate_matrix_declaration(declared["embeddings"], model_manifest, expected_rows)
+    _validate_corpus_declarations(
+        bundle,
+        corpus_manifest,
+        {key: declared[key] for key in _CORPUS_DEPLOYED_FILES},
+    )
+    return model_manifest, corpus_manifest, declared
+
+
+def _validate_visual_binding(
+    visual_manifest_path: Path,
+    visual_payload: Mapping[str, object],
+    corpus_manifest: Mapping[str, object],
+) -> None:
+    output = visual_payload.get("output")
+    if not isinstance(output, dict):
+        raise CorpusBuildError("visual preflight output provenance must be an object")
+    output_sha256 = _sha256_digest(
+        output.get("sha256"), "visual preflight output.sha256"
+    )
+    source = corpus_manifest.get("source")
+    if not isinstance(source, dict):
+        raise CorpusBuildError("corpus build manifest is missing source provenance")
+    input_sha256 = _sha256_digest(
+        source.get("input_sha256"), "corpus build source.input_sha256"
+    )
+    payloads = source.get("payloads")
+    if not isinstance(payloads, list):
+        raise CorpusBuildError("corpus build source payloads must be a list")
+    payload_sha256: set[str] = set()
+    for index, payload in enumerate(payloads):
+        if not isinstance(payload, dict):
+            raise CorpusBuildError("corpus build source payload entries must be objects")
+        payload_sha256.add(
+            _sha256_digest(
+                payload.get("sha256"),
+                f"corpus build source payloads[{index}].sha256",
+            )
+        )
+    if (
+        output_sha256 != input_sha256
+        and sha256_file(visual_manifest_path) not in payload_sha256
+    ):
+        raise CorpusBuildError(
+            "visual preflight manifest is not bound to this embedding bundle"
+        )
+
+
 def derive_embedded_corpus(
     bundle_dir: Path | str,
     visual_manifest: Path | str,
@@ -135,13 +419,9 @@ def derive_embedded_corpus(
     destination = Path(output_csv).resolve()
     manifest_destination = destination.with_suffix(".manifest.json")
     transaction_path = destination.with_name(f".{destination.name}.derive-transaction.json")
-    corpus_path = bundle / "corpus.csv"
-    embedded_path = bundle / "embedded-images.manifest.csv"
     model_manifest_path = bundle / "model-manifest.json"
 
     source_paths = {
-        corpus_path.resolve(),
-        embedded_path.resolve(),
         model_manifest_path.resolve(),
         visual_manifest_path,
     }
@@ -177,6 +457,21 @@ def derive_embedded_corpus(
         raise CorpusBuildError(
             f"required visual preflight manifest is missing: {visual_manifest_path}"
         )
+    model_manifest, corpus_manifest, declared_paths = _validated_embedding_bundle(bundle)
+    corpus_path = declared_paths["metadata"]
+    embedded_path = declared_paths["embeddedImages"]
+    declared_sources = {
+        model_manifest_path.resolve(),
+        corpus_path,
+        embedded_path,
+        visual_manifest_path,
+    }
+    if (
+        destination in declared_sources
+        or manifest_destination in declared_sources
+        or transaction_path in declared_sources
+    ):
+        raise CorpusBuildError("outputs must not overwrite an embedding provenance source")
     try:
         visual_payload = json.loads(visual_manifest_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
@@ -187,29 +482,36 @@ def derive_embedded_corpus(
         raise CorpusBuildError("visual preflight manifest must contain a JSON object")
     if not isinstance(visual_payload.get("rights_gate"), dict):
         raise CorpusBuildError("visual preflight manifest is missing rights_gate provenance")
+    images = visual_payload.get("images")
+    if not isinstance(images, dict) or images.get("availability_preflight") is not True:
+        raise CorpusBuildError(
+            "visual preflight manifest must declare "
+            "images.availability_preflight=true"
+        )
+    _validate_visual_binding(visual_manifest_path, visual_payload, corpus_manifest)
+    placeholder_basenames, placeholder_policy_source = _placeholder_policy(visual_payload)
+    placeholder_by_casefold = {
+        name.casefold(): name for name in placeholder_basenames
+    }
 
-    corpus_rows = _read_csv(corpus_path, ("artwork_id",))
+    corpus_rows = _read_csv(corpus_path, ("artwork_id", "embedding_offset"))
     embedded_rows = _read_csv(
         embedded_path,
-        ("artwork_id", "input_sha256", "image_url"),
+        ("artwork_id", "embedding_offset", "input_sha256", "image_url"),
     )
+    corpus_artwork_ids = _ordered_artwork_ids(corpus_rows, corpus_path.name)
+    embedded_artwork_ids = _ordered_artwork_ids(embedded_rows, embedded_path.name)
+    if corpus_artwork_ids != embedded_artwork_ids:
+        raise CorpusBuildError(
+            "bundle artwork IDs do not match in embedding_offset order"
+        )
     corpus_by_id = _rows_by_id(corpus_rows, corpus_path.name)
     embedded_by_id = _rows_by_id(embedded_rows, embedded_path.name)
-    missing_embedded = sorted(set(corpus_by_id) - set(embedded_by_id))
-    extra_embedded = sorted(set(embedded_by_id) - set(corpus_by_id))
-    if missing_embedded or extra_embedded:
-        details = []
-        if missing_embedded:
-            details.append(
-                f"{len(missing_embedded)} corpus rows lack embedded provenance "
-                f"(first: {missing_embedded[0]})"
-            )
-        if extra_embedded:
-            details.append(
-                f"{len(extra_embedded)} embedded rows lack corpus metadata "
-                f"(first: {extra_embedded[0]})"
-            )
-        raise CorpusBuildError("bundle artwork IDs do not match: " + "; ".join(details))
+    expected_rows = _manifest_count(model_manifest, "model")
+    if len(corpus_rows) != expected_rows or len(embedded_rows) != expected_rows:
+        raise CorpusBuildError(
+            "embedding bundle row count does not match its completed model manifest"
+        )
 
     selection = visual_payload.get("selection")
     if not isinstance(selection, dict):
@@ -233,13 +535,15 @@ def derive_embedded_corpus(
         )
 
     output_rows: list[dict[str, object]] = []
-    excluded = {name: 0 for name in KNOWN_MET_PLACEHOLDERS}
+    excluded = {name: 0 for name in placeholder_basenames}
     replaced_declared_hashes = 0
     input_hashes: set[str] = set()
     for corpus_row in corpus_rows:
         artwork_id = corpus_row["artwork_id"].strip()
         embedded_row = embedded_by_id[artwork_id]
-        placeholder = _placeholder_name(corpus_row, embedded_row)
+        placeholder = _placeholder_name(
+            corpus_row, embedded_row, placeholder_by_casefold
+        )
         if placeholder:
             excluded[placeholder] += 1
             continue
@@ -274,6 +578,10 @@ def derive_embedded_corpus(
                 "input_width": embedded_row.get("input_width", ""),
                 "input_height": embedded_row.get("input_height", ""),
                 "input_policy": embedded_row.get("input_policy", ""),
+                # Keep the adapter policy in the field consumed by the next
+                # canonical build. This makes a derive -> build -> embed cycle
+                # preserve the exact remote derivative contract.
+                "image_input_policy": embedded_row.get("input_policy", ""),
             }
         )
 
@@ -296,16 +604,19 @@ def derive_embedded_corpus(
         total_excluded = sum(excluded.values())
         upstream_excluded = requested_rows - prepared_rows
         prior_downstream_excluded = prepared_rows - len(corpus_rows)
+        operation: dict[str, object] = {
+            "join_key": "artwork_id",
+            "visual_identity": "sha256:<embedded input_sha256>",
+            "known_placeholder_basenames": list(placeholder_basenames),
+            "image_path_policy": "blank-no-durable-pixel-storage",
+            "embedding_offset_policy": "blank-rebuild-required-after-filtering",
+        }
+        if placeholder_policy_source != "legacy-met-default":
+            operation["placeholder_policy_source"] = placeholder_policy_source
         manifest: dict[str, object] = {
             "schema_version": DERIVATION_SCHEMA_VERSION,
             "builder_version": __version__,
-            "operation": {
-                "join_key": "artwork_id",
-                "visual_identity": "sha256:<embedded input_sha256>",
-                "known_placeholder_basenames": list(KNOWN_MET_PLACEHOLDERS),
-                "image_path_policy": "blank-no-durable-pixel-storage",
-                "embedding_offset_policy": "blank-rebuild-required-after-filtering",
-            },
+            "operation": operation,
             "counts": {
                 "corpus_rows": len(corpus_rows),
                 "embedded_image_rows": len(embedded_rows),
