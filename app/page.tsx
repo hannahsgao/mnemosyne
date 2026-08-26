@@ -78,8 +78,8 @@ const SEARCH_MODE_HELP: Record<SearchMode, string> = {
 };
 
 const CHART_HELP: Record<SearchMode, string> = {
-  embedding: "Higher values mean visual matches are more concentrated in that period than across the collection overall. Gaps mark periods with too little evidence.",
-  keyword: "Higher values mean a larger share of dated catalogue records match in that period. Gaps mark periods with too little evidence.",
+  embedding: "Higher means visual matches are more concentrated in that period. Gaps mean limited evidence.",
+  keyword: "Higher means more dated records match in that period. Gaps mean limited evidence.",
 };
 
 type SearchOptions = {
