@@ -23,7 +23,7 @@ import {
   prepareEvidenceRequest,
   searchErrorPlacement,
 } from "../lib/explorer-state";
-import { sampleHoverArtwork } from "../lib/hover-preview";
+import { hoverPreviewImageUrl, sampleHoverArtwork } from "../lib/hover-preview";
 import { MAX_QUERY_LENGTH, parseConceptQuery, QuerySyntaxError } from "../lib/query";
 import { requestKeywordEvidence, requestKeywordSearch } from "../lib/keyword-transport";
 import { requestVisualEvidence, requestVisualSearch } from "../lib/visual-transport";
@@ -72,8 +72,35 @@ const METADATA_EXAMPLE_QUERIES = [
 ];
 const INITIAL_VISIBLE_WORKS = 5;
 const VISIBLE_WORK_BATCH = 5;
-const HOVER_PREVIEW_DELAY_MS = 75;
+const HOVER_PREVIEW_DELAY_MS = 50;
 const HOVER_PREVIEW_CACHE_LIMIT = 80;
+const preloadedHoverImageUrls = new Set<string>();
+const pendingHoverImagePreloads = new Map<string, HTMLImageElement>();
+
+function preloadHoverArtwork(artwork: EvidenceArtwork | null) {
+  const imageUrl = hoverPreviewImageUrl(artwork?.imageUrl);
+  if (!imageUrl || typeof Image === "undefined" || preloadedHoverImageUrls.has(imageUrl)) {
+    return;
+  }
+
+  const image = new Image();
+  preloadedHoverImageUrls.add(imageUrl);
+  pendingHoverImagePreloads.set(imageUrl, image);
+  while (preloadedHoverImageUrls.size > HOVER_PREVIEW_CACHE_LIMIT) {
+    const oldest = preloadedHoverImageUrls.values().next().value;
+    if (oldest === undefined) break;
+    preloadedHoverImageUrls.delete(oldest);
+  }
+
+  image.decoding = "async";
+  image.fetchPriority = "low";
+  image.onload = () => pendingHoverImagePreloads.delete(imageUrl);
+  image.onerror = () => {
+    pendingHoverImagePreloads.delete(imageUrl);
+    preloadedHoverImageUrls.delete(imageUrl);
+  };
+  image.src = imageUrl;
+}
 
 function hoverPreviewCacheKey(
   query: string,
@@ -108,11 +135,13 @@ function cacheSelectedEvidencePreview(
   const selection = { queryId: evidence.queryId, binKey: evidence.binKey };
   const key = hoverPreviewCacheKey(query, mode, selection);
   if (!cache.has(key)) {
+    const artwork = sampleHoverArtwork(evidence, failedArtworkIds.get(key));
     writeHoverPreviewCache(
       cache,
       key,
-      sampleHoverArtwork(evidence, failedArtworkIds.get(key)),
+      artwork,
     );
+    preloadHoverArtwork(artwork);
   }
 }
 

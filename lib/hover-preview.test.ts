@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveHoverPreviewContent, sampleHoverArtwork } from "./hover-preview.ts";
+import {
+  hoverPreviewImageUrl,
+  resolveHoverPreviewContent,
+  sampleHoverArtwork,
+} from "./hover-preview.ts";
 import type {
   EvidenceArtwork,
   EvidenceSlices,
@@ -211,4 +215,27 @@ test("returns null when no contributor image can be shown", () => {
     sampleHoverArtwork(evidence({ strongest: [artwork("missing", { imageUrl: "" })] })),
     null,
   );
+});
+
+test("requests a compact 2x NGA derivative for the hover image only", () => {
+  assert.equal(
+    hoverPreviewImageUrl(
+      "https://api.nga.gov/iiif/0e214a06-a5d0-44c7-9e2e-f4d1d4a97df4/full/%21743%2C1024/0/default.jpg",
+    ),
+    "https://api.nga.gov/iiif/0e214a06-a5d0-44c7-9e2e-f4d1d4a97df4/full/!264,216/0/default.jpg",
+  );
+});
+
+test("preserves non-NGA and nonstandard artwork image URLs", () => {
+  const met = "https://images.metmuseum.org/CRDImages/md/web-large/example.jpg";
+  const proxy = "/api/backend-image?id=MET_1&searchMode=embedding";
+  const ngaInfo = "https://api.nga.gov/iiif/example/info.json";
+  const signedNga =
+    "https://api.nga.gov/iiif/example/full/%21743%2C1024/0/default.jpg?token=signed";
+
+  assert.equal(hoverPreviewImageUrl(met), met);
+  assert.equal(hoverPreviewImageUrl(proxy), proxy);
+  assert.equal(hoverPreviewImageUrl(ngaInfo), ngaInfo);
+  assert.equal(hoverPreviewImageUrl(signedNga), signedNga);
+  assert.equal(hoverPreviewImageUrl(null), null);
 });

@@ -52,6 +52,10 @@ export async function generateMetadata(): Promise<Metadata> {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
+      <head>
+        <link rel="preconnect" href="https://images.metmuseum.org" />
+        <link rel="preconnect" href="https://api.nga.gov" />
+      </head>
       <body>{children}</body>
     </html>
   );
