@@ -36,11 +36,13 @@ type BinRow = {
   cluster_count: number;
 };
 
-type AggregateRow = {
-  bin_index: number;
-  hit_mass: number;
-  object_count: number;
+export type DateRangeAggregateRow = {
+  date_start: number;
+  date_end: number;
+  match_count: number;
 };
+
+export type TimelineBinRange = Pick<BinRow, "bin_start" | "bin_end">;
 
 type ArtworkRow = {
   source_id: number;
@@ -191,73 +193,97 @@ async function loadBins(db: D1Database): Promise<BinRow[]> {
   }));
 }
 
+function firstBinEndingOnOrAfter(bins: TimelineBinRange[], year: number) {
+  let low = 0;
+  let high = bins.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (bins[middle].bin_end < year) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function firstBinStartingAfter(bins: TimelineBinRange[], year: number) {
+  let low = 0;
+  let high = bins.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (bins[middle].bin_start <= year) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+export function aggregateDateRanges(
+  rangeRows: DateRangeAggregateRow[],
+  bins: TimelineBinRange[],
+) {
+  const hitMass = new Float64Array(bins.length);
+  const objectCounts = new Uint32Array(bins.length);
+  let totalMatches = 0;
+
+  for (const row of rangeRows) {
+    const dateStart = number(row.date_start);
+    const dateEnd = number(row.date_end);
+    const matchCount = Math.max(0, Math.trunc(number(row.match_count)));
+    totalMatches += matchCount;
+    if (!matchCount || dateEnd < dateStart) continue;
+
+    const rangeYears =
+      dateEnd - dateStart + 1 - (dateStart <= 0 && dateEnd >= 0 ? 1 : 0);
+    if (rangeYears <= 0) continue;
+
+    const startIndex = firstBinEndingOnOrAfter(bins, dateStart);
+    const endIndex = firstBinStartingAfter(bins, dateEnd);
+    for (let index = startIndex; index < endIndex; index += 1) {
+      const bin = bins[index];
+      const overlapStart = Math.max(dateStart, bin.bin_start);
+      const overlapEnd = Math.min(dateEnd, bin.bin_end);
+      const overlapYears = Math.max(
+        0,
+        overlapEnd - overlapStart + 1 -
+          (overlapStart <= 0 && overlapEnd >= 0 ? 1 : 0),
+      );
+      if (!overlapYears) continue;
+      hitMass[index] += matchCount * overlapYears / rangeYears;
+      objectCounts[index] += matchCount;
+    }
+  }
+
+  return { hitMass, objectCounts, totalMatches };
+}
+
 async function aggregateTerm(db: D1Database, term: QueryTerm, bins: BinRow[]) {
   const expression = ftsExpression(term.normalized);
-  const [countRow, aggregateResult] = await Promise.all([
-    db
-      .prepare(
-        `SELECT COUNT(*) AS total
-         FROM artwork_fts
-         JOIN artworks ON artworks.row_id = artwork_fts.rowid
-         WHERE artwork_fts MATCH ?`,
-      )
-      .bind(expression)
-      .first<{ total: number }>(),
-    db
-      .prepare(
-        `SELECT bins.bin_index AS bin_index,
-                SUM(
-                  CAST(
-                    MAX(0, MIN(artworks.date_end, bins.bin_end) -
-                           MAX(artworks.date_start, bins.bin_start) + 1 -
-                           CASE
-                             WHEN MAX(artworks.date_start, bins.bin_start) <= 0
-                              AND MIN(artworks.date_end, bins.bin_end) >= 0 THEN 1
-                             ELSE 0
-                           END)
-                    AS REAL
-                  ) /
-                  CAST(
-                    artworks.date_end - artworks.date_start + 1 -
-                    CASE
-                      WHEN artworks.date_start <= 0 AND artworks.date_end >= 0 THEN 1
-                      ELSE 0
-                    END
-                    AS REAL
-                  )
-                ) AS hit_mass,
-                COUNT(*) AS object_count
-         FROM artwork_fts
-         JOIN artworks ON artworks.row_id = artwork_fts.rowid
-         JOIN bins ON bins.bin_end >= artworks.date_start
-                  AND bins.bin_start <= artworks.date_end
-         WHERE artwork_fts MATCH ?
-         GROUP BY bins.bin_index
-         ORDER BY bins.bin_index`,
-      )
-      .bind(expression)
-      .all<AggregateRow>(),
-  ]);
-  const byBin = new Map(
-    rows(aggregateResult).map((row) => [
-      number(row.bin_index),
-      { hitMass: number(row.hit_mass), objectCount: number(row.object_count) },
-    ]),
-  );
-  const points = bins.map((bin) => {
-    const aggregate = byBin.get(bin.bin_index) ?? { hitMass: 0, objectCount: 0 };
-    const share = bin.denominator ? aggregate.hitMass / bin.denominator : 0;
+  // D1 groups identical date ranges once; the Worker expands those compact
+  // groups across bins without the artwork-by-bin SQL cross product.
+  const aggregateResult = await db
+    .prepare(
+      `SELECT artworks.date_start AS date_start,
+              artworks.date_end AS date_end,
+              COUNT(*) AS match_count
+       FROM artwork_fts
+       JOIN artworks ON artworks.row_id = artwork_fts.rowid
+       WHERE artwork_fts MATCH ?
+       GROUP BY artworks.date_start, artworks.date_end`,
+    )
+    .bind(expression)
+    .all<DateRangeAggregateRow>();
+  const aggregate = aggregateDateRanges(rows(aggregateResult), bins);
+  const points = bins.map((bin, index) => {
+    const share = bin.denominator ? aggregate.hitMass[index] / bin.denominator : 0;
     return {
       binKey: bin.bin_key,
       value: share,
       share,
       lift: null,
-      hitMass: aggregate.hitMass,
-      objectCount: aggregate.objectCount,
-      clusterCount: aggregate.objectCount,
+      hitMass: aggregate.hitMass[index],
+      objectCount: aggregate.objectCounts[index],
+      clusterCount: aggregate.objectCounts[index],
     };
   });
-  return { totalMatches: number(countRow?.total), points, expression };
+  return { totalMatches: aggregate.totalMatches, points, expression };
 }
 
 function selectedBinIndex(
@@ -505,13 +531,9 @@ async function handleSearch(request: Request, db: D1Database) {
     }>();
     const aggregates = await Promise.all(terms.map((term) => aggregateTerm(db, term, bins)));
     const selectedIndex = selectedTermIndex(payload, terms);
-    const binIndex = selectedBinIndex(payload.selectedBinKey, bins, aggregates[selectedIndex].points);
-    const cards = await evidence(
-      db,
-      terms[selectedIndex],
-      aggregates[selectedIndex].expression,
-      bins[binIndex],
-    );
+    // Preserve selection validation while keeping remote artwork hydration off
+    // the chart's critical path. The client loads cards through /v1/evidence.
+    selectedBinIndex(payload.selectedBinKey, bins, aggregates[selectedIndex].points);
     const warnings: string[] = [];
     const sparseCount = bins.filter((bin) => bin.denominator < MINIMUM_DENOMINATOR).length;
     if (sparseCount) {
@@ -570,11 +592,7 @@ async function handleSearch(request: Request, db: D1Database) {
         points: aggregates[index].points,
         totalMatches: aggregates[index].totalMatches,
       })),
-      selectedEvidence: selectedEvidencePayload(
-        terms[selectedIndex],
-        bins[binIndex],
-        cards,
-      ),
+      selectedEvidence: null,
       warnings,
       generatedAt: new Date().toISOString(),
     });

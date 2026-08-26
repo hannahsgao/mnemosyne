@@ -2,13 +2,18 @@
 
 import {
   type FormEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { Timeline } from "../components/Timeline";
-import { nearestMatchGroups, selectedEvidenceItems } from "../lib/evidence";
+import { Timeline, type TimelineHoverPreview } from "../components/Timeline";
+import {
+  evidencePreviewLabel,
+  nearestMatchGroups,
+  selectedEvidenceItems,
+} from "../lib/evidence";
 import {
   evidenceMatchesSelection,
   invalidSearchStatus,
@@ -16,6 +21,7 @@ import {
   prepareEvidenceRequest,
   searchErrorPlacement,
 } from "../lib/explorer-state";
+import { sampleHoverArtwork } from "../lib/hover-preview";
 import { MAX_QUERY_LENGTH, parseConceptQuery, QuerySyntaxError } from "../lib/query";
 import { requestKeywordEvidence, requestKeywordSearch } from "../lib/keyword-transport";
 import { requestVisualEvidence, requestVisualSearch } from "../lib/visual-transport";
@@ -64,6 +70,49 @@ const METADATA_EXAMPLE_QUERIES = [
 ];
 const INITIAL_VISIBLE_WORKS = 5;
 const VISIBLE_WORK_BATCH = 5;
+const HOVER_PREVIEW_DELAY_MS = 75;
+const HOVER_PREVIEW_CACHE_LIMIT = 80;
+
+function hoverPreviewCacheKey(
+  query: string,
+  mode: SearchMode,
+  selection: ChartSelection,
+) {
+  return `${mode}\u0000${query}\u0000${selection.queryId}\u0000${selection.binKey}`;
+}
+
+function writeHoverPreviewCache(
+  cache: Map<string, EvidenceArtwork | null>,
+  key: string,
+  artwork: EvidenceArtwork | null,
+) {
+  cache.delete(key);
+  cache.set(key, artwork);
+  while (cache.size > HOVER_PREVIEW_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+function cacheSelectedEvidencePreview(
+  cache: Map<string, EvidenceArtwork | null>,
+  failedArtworkIds: Map<string, Set<string>>,
+  query: string,
+  mode: SearchMode,
+  evidence: SelectedEvidence | null,
+) {
+  if (!evidence) return;
+  const selection = { queryId: evidence.queryId, binKey: evidence.binKey };
+  const key = hoverPreviewCacheKey(query, mode, selection);
+  if (!cache.has(key)) {
+    writeHoverPreviewCache(
+      cache,
+      key,
+      sampleHoverArtwork(evidence, failedArtworkIds.get(key)),
+    );
+  }
+}
 
 const SEARCH_INPUT_LABELS: Record<SearchMode, string> = {
   embedding: "Search artworks by visual content",
@@ -85,6 +134,10 @@ const SEARCH_MODE_HELP: Record<SearchMode, string> = {
   keyword: "Search words in the catalogue record.",
 };
 
+const CHART_HELP: Record<SearchMode, string> = {
+  embedding: "Higher means visual matches are more concentrated in that period. Gaps mean limited evidence.",
+  keyword: "Higher means more dated records match in that period. Gaps mean limited evidence.",
+};
 type SearchOptions = {
   syncInput?: boolean;
   requestedSelection?: ChartSelection | null;
@@ -153,7 +206,6 @@ function ChartCalculationTooltip({ metric }: { metric: MetricMetadata }) {
     </span>
   );
 }
-
 function institutionLabel(value: string) {
   const normalized = value.trim().toLowerCase();
   if (normalized === "met" || normalized === "the met") return "The Met";
@@ -166,13 +218,6 @@ function institutionLabel(value: string) {
   return value || "Museum source unavailable";
 }
 
-function matchingItemLabel(
-  count: number,
-  countingUnit: CorpusMetadata["countingUnit"],
-) {
-  return `${count} matching ${itemNoun(count, countingUnit)}`;
-}
-
 function itemNoun(count: number, countingUnit: CorpusMetadata["countingUnit"]) {
   if (countingUnit === "catalog-record") {
     return `catalog record${count === 1 ? "" : "s"}`;
@@ -182,10 +227,11 @@ function itemNoun(count: number, countingUnit: CorpusMetadata["countingUnit"]) {
 
 function corpusSummary(corpus: CorpusMetadata) {
   const label = corpus.label === corpus.id
-    ? "Open-access museum image corpus"
+    ? "Open-access museum image catalog"
     : corpus.label;
-  if (corpus.count === null) return label;
-  return `${corpus.count.toLocaleString()} ${itemNoun(corpus.count, corpus.countingUnit)} · ${label}`;
+  return corpus.count === null
+    ? label
+    : `${corpus.count.toLocaleString()} ${itemNoun(corpus.count, corpus.countingUnit)} · ${label}`;
 }
 
 function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
@@ -231,17 +277,23 @@ function ProgressiveArtworkGrid({
   artworks,
   emptyMessage,
   isLoading,
+  onVisibleCountChange,
   showEmpty,
 }: {
   artworks: EvidenceArtwork[];
   emptyMessage: string;
   isLoading: boolean;
+  onVisibleCountChange?: (count: number) => void;
   showEmpty: boolean;
 }) {
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_WORKS);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const visibleArtworks = artworks.slice(0, visibleCount);
   const hasMore = visibleArtworks.length < artworks.length;
+
+  useEffect(() => {
+    onVisibleCountChange?.(visibleArtworks.length);
+  }, [onVisibleCountChange, visibleArtworks.length]);
 
   useEffect(() => {
     const sentinel = sentinelRef.current;
@@ -287,7 +339,6 @@ function ProgressiveArtworkGrid({
     </>
   );
 }
-
 function selectionFromRequestedState(
   response: SearchResponse,
   requested: ChartSelection | null | undefined,
@@ -311,12 +362,111 @@ export default function Home() {
   const [hiddenQueryIds, setHiddenQueryIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [evidenceLoading, setEvidenceLoading] = useState(false);
+  const [visibleEvidenceCount, setVisibleEvidenceCount] = useState(INITIAL_VISIBLE_WORKS);
+  const [hoverPreview, setHoverPreview] = useState<TimelineHoverPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const requestId = useRef(0);
   const evidenceRequestId = useRef(0);
+  const hoverPreviewRequestId = useRef(0);
   const searchAbort = useRef<AbortController | null>(null);
   const evidenceAbort = useRef<AbortController | null>(null);
+  const hoverPreviewAbort = useRef<AbortController | null>(null);
+  const hoverPreviewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hoverPreviewCache = useRef(new Map<string, EvidenceArtwork | null>());
+  const failedHoverArtworkIds = useRef(new Map<string, Set<string>>());
+
+  function resetHoverPreview(clearCache = false) {
+    hoverPreviewRequestId.current += 1;
+    if (hoverPreviewTimer.current !== null) {
+      clearTimeout(hoverPreviewTimer.current);
+      hoverPreviewTimer.current = null;
+    }
+    hoverPreviewAbort.current?.abort();
+    hoverPreviewAbort.current = null;
+    setHoverPreview(null);
+    if (clearCache) {
+      hoverPreviewCache.current.clear();
+      failedHoverArtworkIds.current.clear();
+    }
+  }
+
+  const handleHoverSelection = useCallback((nextSelection: ChartSelection | null) => {
+    const currentRequest = ++hoverPreviewRequestId.current;
+    if (hoverPreviewTimer.current !== null) {
+      clearTimeout(hoverPreviewTimer.current);
+      hoverPreviewTimer.current = null;
+    }
+    hoverPreviewAbort.current?.abort();
+    hoverPreviewAbort.current = null;
+    setHoverPreview(null);
+    if (!nextSelection) return;
+
+    const key = hoverPreviewCacheKey(submittedQuery, submittedSearchMode, nextSelection);
+    const cache = hoverPreviewCache.current;
+    if (cache.has(key)) {
+      const artwork = cache.get(key) ?? null;
+      cache.delete(key);
+      cache.set(key, artwork);
+      if (artwork) setHoverPreview({ selection: nextSelection, artwork });
+      return;
+    }
+
+    hoverPreviewTimer.current = setTimeout(() => {
+      hoverPreviewTimer.current = null;
+      const controller = new AbortController();
+      hoverPreviewAbort.current = controller;
+      void (async () => {
+        try {
+          const { response, payload } = submittedSearchMode === "keyword"
+            ? await requestKeywordEvidence(submittedQuery, nextSelection, {
+                signal: controller.signal,
+              })
+            : await requestVisualEvidence(submittedQuery, nextSelection, {
+                signal: controller.signal,
+              });
+          if (!response.ok || !isEvidenceEnvelope(payload)) return;
+          if (hoverPreviewRequestId.current !== currentRequest) return;
+          const evidence = payload.selectedEvidence;
+          const artwork = evidenceMatchesSelection(evidence, nextSelection)
+            ? sampleHoverArtwork(evidence, failedHoverArtworkIds.current.get(key))
+            : null;
+          writeHoverPreviewCache(cache, key, artwork);
+          if (artwork) setHoverPreview({ selection: nextSelection, artwork });
+        } catch {
+          // Image failures are decorative; the chart caption remains available.
+        } finally {
+          if (hoverPreviewAbort.current === controller) hoverPreviewAbort.current = null;
+        }
+      })();
+    }, HOVER_PREVIEW_DELAY_MS);
+  }, [submittedQuery, submittedSearchMode]);
+
+  const handleHoverPreviewError = useCallback((failedPreview: TimelineHoverPreview) => {
+    const key = hoverPreviewCacheKey(
+      submittedQuery,
+      submittedSearchMode,
+      failedPreview.selection,
+    );
+    const failures = failedHoverArtworkIds.current;
+    const artworkIds = failures.get(key) ?? new Set<string>();
+    artworkIds.add(failedPreview.artwork.artworkId);
+    failures.delete(key);
+    failures.set(key, artworkIds);
+    while (failures.size > HOVER_PREVIEW_CACHE_LIMIT) {
+      const oldest = failures.keys().next().value;
+      if (oldest === undefined) break;
+      failures.delete(oldest);
+    }
+    hoverPreviewCache.current.delete(key);
+    setHoverPreview((current) =>
+      current?.selection.queryId === failedPreview.selection.queryId &&
+      current.selection.binKey === failedPreview.selection.binKey &&
+      current.artwork.artworkId === failedPreview.artwork.artworkId
+        ? null
+        : current,
+    );
+  }, [submittedQuery, submittedSearchMode]);
 
   function replacePageState(query: string, mode: SearchMode, nextSelection: ChartSelection | null) {
     const nextUrl = pageUrlForSearchState(window.location.href, {
@@ -358,6 +508,7 @@ export default function Home() {
     }
 
     const trimmedQuery = nextQuery.trim();
+    resetHoverPreview(true);
     const controller = new AbortController();
     searchAbort.current = controller;
     replacePageState(trimmedQuery, nextMode, null);
@@ -370,6 +521,7 @@ export default function Home() {
     setError(null);
     setEvidenceError(null);
     setSelection(null);
+    setVisibleEvidenceCount(INITIAL_VISIBLE_WORKS);
     setHiddenQueryIds(new Set());
 
     try {
@@ -408,6 +560,13 @@ export default function Home() {
           ? { queryId: payload.selectedEvidence.queryId, binKey: payload.selectedEvidence.binKey }
           : peakSelection(payload)
       );
+      cacheSelectedEvidencePreview(
+        hoverPreviewCache.current,
+        failedHoverArtworkIds.current,
+        trimmedQuery,
+        nextMode,
+        payload.selectedEvidence,
+      );
       setResult(payload);
       setSelection(nextSelection);
       replacePageState(trimmedQuery, nextMode, nextSelection);
@@ -436,6 +595,9 @@ export default function Home() {
   }
 
   async function loadEvidence(nextSelection: ChartSelection, context: EvidenceContext = {}) {
+    if (selection?.queryId !== nextSelection.queryId || selection?.binKey !== nextSelection.binKey) {
+      setVisibleEvidenceCount(INITIAL_VISIBLE_WORKS);
+    }
     setSelection(nextSelection);
     const activeQuery = context.query ?? submittedQuery;
     const activeMode = context.mode ?? submittedSearchMode;
@@ -486,6 +648,13 @@ export default function Home() {
         selectedEvidence = payload.selectedEvidence;
       }
       if (evidenceRequestId.current !== currentRequest) return;
+      cacheSelectedEvidencePreview(
+        hoverPreviewCache.current,
+        failedHoverArtworkIds.current,
+        activeQuery,
+        activeMode,
+        selectedEvidence,
+      );
       setResult((current) => current ? { ...current, selectedEvidence } : current);
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") return;
@@ -504,6 +673,9 @@ export default function Home() {
     return () => {
       searchAbort.current?.abort();
       evidenceAbort.current?.abort();
+      hoverPreviewRequestId.current += 1;
+      if (hoverPreviewTimer.current !== null) clearTimeout(hoverPreviewTimer.current);
+      hoverPreviewAbort.current?.abort();
     };
     // Initial state comes from the shareable URL; subsequent searches are user-driven.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -521,12 +693,6 @@ export default function Home() {
   const selectedBin = result?.bins.find((bin) => bin.key === selection?.binKey) ?? null;
   const selectedSeries = result?.series.find((series) => series.queryId === selection?.queryId) ?? null;
   const selectedPoint = selectedSeries && selection ? pointForBin(selectedSeries, selection.binKey) : null;
-  const currentEvidence = result?.selectedEvidence ?? null;
-  const selectedEvidence = currentEvidence &&
-    currentEvidence.queryId === selection?.queryId &&
-    currentEvidence.binKey === selection?.binKey
-    ? currentEvidence
-    : null;
   const displayedBins = result?.bins.length ? timelineWindow(result.bins) : [];
   const hasChartPoints = result?.series.some((series) => series.points.length > 0) ?? false;
   const allTermsUnmatched = Boolean(
@@ -670,12 +836,15 @@ export default function Home() {
               metric={result.metric}
               countingUnit={result.corpus.countingUnit}
               label={resultsTitle}
-              description={describeTimelineMetric(result.metric)}
+              description={CHART_HELP[submittedSearchMode]}
               selection={selection}
               hiddenQueryIds={hiddenQueryIds}
+              hoverPreview={hoverPreview}
               onSelect={(nextSelection) => void loadEvidence(nextSelection)}
               onActivateSeries={activateSeries}
               onToggleSeries={toggleSeries}
+              onHoverSelection={handleHoverSelection}
+              onHoverPreviewError={handleHoverPreviewError}
             />
           )}
           {!loading && !error && result && !result.bins.length && (
@@ -725,16 +894,18 @@ export default function Home() {
                 ? "Select a point on the chart to see artworks"
                 : `${selectedQuery.label} · ${selectedBin.label}`}
             </h2>
-            {selectedPoint && submittedSearchMode === "keyword" && (
-              <p>{matchingItemLabel(selectedPoint.objectCount, result!.corpus.countingUnit)}</p>
-            )}
-            {selectedPoint && submittedSearchMode !== "keyword" && (
+            {selectedPoint && (
               <p>
                 {evidenceLoading
                   ? "Loading artworks…"
                   : evidenceError
                     ? "Artworks unavailable"
-                    : matchingItemLabel(selectedEvidence?.contributorCount ?? 0, result!.corpus.countingUnit)}
+                    : evidencePreviewLabel(
+                        Math.min(visibleEvidenceCount, evidenceItems.length),
+                        evidenceItems.length,
+                        selectedPoint.objectCount,
+                        result!.corpus.countingUnit,
+                      )}
               </p>
             )}
           </div>
@@ -747,6 +918,7 @@ export default function Home() {
               ? "No keyword matches in this period."
               : "No strong visual matches in this period."}
             isLoading={evidenceLoading}
+            onVisibleCountChange={setVisibleEvidenceCount}
             showEmpty={Boolean(!evidenceError && selection && evidenceItems.length === 0 && !loading)}
           />
           </section>

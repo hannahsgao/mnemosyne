@@ -231,7 +231,7 @@ async function searchAic(query: QueryDescriptor): Promise<PrototypeQueryResult> 
       dateStart: work.date_start,
       dateEnd: work.date_start,
       dateQualifier: "catalogue display date",
-      imageUrl: work.image_id ? `/api/image/${work.image_id}` : null,
+      imageUrl: work.image_id ? `/api/image/${work.image_id}?v=proxy-1` : null,
       sourceRecordUrl: `${websiteBase}/artworks/${work.id}`,
       metadataLicense: "CC0 metadata",
       imageRightsUri: "",

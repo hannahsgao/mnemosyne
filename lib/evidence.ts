@@ -1,5 +1,6 @@
 import type {
   ChartSelection,
+  CorpusMetadata,
   EvidenceArtwork,
   EvidenceSlices,
   QueryDescriptor,
@@ -12,6 +13,23 @@ export type NearestMatchGroup = {
   query: QueryDescriptor;
   artworks: EvidenceArtwork[];
 };
+
+/** Describe the rendered preview separately from the full selected-period match count. */
+export function evidencePreviewLabel(
+  visibleCardCount: number,
+  availableCardCount: number,
+  totalMatchCount: number,
+  countingUnit: CorpusMetadata["countingUnit"],
+) {
+  const cardNoun = `preview card${availableCardCount === 1 ? "" : "s"}`;
+  const matchNoun = countingUnit === "catalog-record"
+    ? `catalog record${totalMatchCount === 1 ? "" : "s"}`
+    : `work${totalMatchCount === 1 ? "" : "s"}`;
+  const previewCount = visibleCardCount < availableCardCount
+    ? `${visibleCardCount} of ${availableCardCount}`
+    : String(availableCardCount);
+  return `Showing ${previewCount} ${cardNoun} from ${totalMatchCount} matching ${matchNoun}`;
+}
 
 /**
  * Select exploratory nearest neighbors without allowing them into timeline evidence.

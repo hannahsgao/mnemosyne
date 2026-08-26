@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  evidencePreviewLabel,
   keywordEvidenceSlices,
   nearestMatchGroups,
   selectedEvidenceItems,
@@ -63,6 +64,25 @@ test("keyword evidence populates the canonical and backward-compatible slices", 
 
   assert.deepEqual(slices.strongest, cards);
   assert.deepEqual(slices.randomContributors, cards);
+});
+
+test("evidence preview labels distinguish rendered cards from all period matches", () => {
+  assert.equal(
+    evidencePreviewLabel(5, 8, 55, "catalog-record"),
+    "Showing 5 of 8 preview cards from 55 matching catalog records",
+  );
+  assert.equal(
+    evidencePreviewLabel(8, 8, 55, "catalog-record"),
+    "Showing 8 preview cards from 55 matching catalog records",
+  );
+  assert.equal(
+    evidencePreviewLabel(5, 25, 162, "physical-object"),
+    "Showing 5 of 25 preview cards from 162 matching works",
+  );
+  assert.equal(
+    evidencePreviewLabel(1, 1, 1, "visual-cluster"),
+    "Showing 1 preview card from 1 matching work",
+  );
 });
 
 test("frontend evidence selection prefers strongest and falls back to legacy contributors", () => {
