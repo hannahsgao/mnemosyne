@@ -1016,7 +1016,11 @@ export function Timeline({
             <strong style={{ color: hoverPlot.color }}>
               {hoverPreviewContent.conceptLabel}
             </strong>
-            <span>{hoverPoint.objectCount} records</span>
+            <span>
+              {hoverPoint.objectCount} {countingUnit === "catalog-record"
+                ? `catalog record${hoverPoint.objectCount === 1 ? "" : "s"}`
+                : `work${hoverPoint.objectCount === 1 ? "" : "s"}`}
+            </span>
           </div>
         </div>
       )}

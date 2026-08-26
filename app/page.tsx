@@ -1,7 +1,9 @@
 "use client";
 
 import {
+  type Dispatch,
   type FormEvent,
+  type SetStateAction,
   useCallback,
   useEffect,
   useMemo,
@@ -279,35 +281,32 @@ function ProgressiveArtworkGrid({
   isLoading,
   onVisibleCountChange,
   showEmpty,
+  visibleCount,
 }: {
   artworks: EvidenceArtwork[];
   emptyMessage: string;
   isLoading: boolean;
-  onVisibleCountChange?: (count: number) => void;
+  onVisibleCountChange: Dispatch<SetStateAction<number>>;
   showEmpty: boolean;
+  visibleCount: number;
 }) {
-  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_WORKS);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const visibleArtworks = artworks.slice(0, visibleCount);
   const hasMore = visibleArtworks.length < artworks.length;
-
-  useEffect(() => {
-    onVisibleCountChange?.(visibleArtworks.length);
-  }, [onVisibleCountChange, visibleArtworks.length]);
 
   useEffect(() => {
     const sentinel = sentinelRef.current;
     if (isLoading || !sentinel || !hasMore) return;
 
     if (!("IntersectionObserver" in window)) {
-      setVisibleCount(artworks.length);
+      onVisibleCountChange(artworks.length);
       return;
     }
 
     const observer = new IntersectionObserver(([entry]) => {
       if (!entry?.isIntersecting) return;
       observer.disconnect();
-      setVisibleCount((current) => Math.min(
+      onVisibleCountChange((current) => Math.min(
         artworks.length,
         current + VISIBLE_WORK_BATCH,
       ));
@@ -315,7 +314,7 @@ function ProgressiveArtworkGrid({
 
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [artworks.length, hasMore, isLoading, visibleCount]);
+  }, [artworks.length, hasMore, isLoading, onVisibleCountChange, visibleCount]);
 
   return (
     <>
@@ -920,6 +919,7 @@ export default function Home() {
             isLoading={evidenceLoading}
             onVisibleCountChange={setVisibleEvidenceCount}
             showEmpty={Boolean(!evidenceError && selection && evidenceItems.length === 0 && !loading)}
+            visibleCount={visibleEvidenceCount}
           />
           </section>
         )}
