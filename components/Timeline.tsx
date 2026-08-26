@@ -452,6 +452,8 @@ export function Timeline({
 
   function handlePointerDown(event: ReactPointerEvent<SVGRectElement>) {
     if (event.pointerType === "mouse" && event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.focus({ preventScroll: true });
     stopViewportAnimation();
     event.currentTarget.setPointerCapture(event.pointerId);
     pointers.current.set(event.pointerId, event.clientX);

@@ -183,6 +183,18 @@ function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
   );
 }
 
+function ArtworkCardSkeleton() {
+  return (
+    <div className="artwork-card artwork-card-loading" aria-hidden="true">
+      <div className="artwork-image-wrap" />
+      <div className="artwork-copy">
+        <span className="artwork-loading-line artwork-loading-title" />
+        <span className="artwork-loading-line artwork-loading-artist" />
+      </div>
+    </div>
+  );
+}
+
 function selectionFromRequestedState(
   response: SearchResponse,
   requested: ChartSelection | null | undefined,
@@ -642,7 +654,9 @@ export default function Home() {
 
           {evidenceError && <p className="evidence-error" role="alert">{evidenceError}</p>}
           <div className="artwork-grid" aria-busy={evidenceLoading}>
-            {evidenceLoading && <p className="no-works">Loading artworks…</p>}
+            {evidenceLoading && Array.from({ length: INITIAL_VISIBLE_WORKS }, (_, index) => (
+              <ArtworkCardSkeleton key={index} />
+            ))}
             {!evidenceLoading && visibleItems.map((artwork) => (
               <ArtworkCard key={artwork.artworkId} artwork={artwork} />
             ))}

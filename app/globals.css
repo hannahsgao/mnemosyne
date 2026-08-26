@@ -589,6 +589,16 @@ a { color: inherit; text-decoration: none; }
 }
 
 .artwork-card:hover { border-color: #bdc1c6; }
+.artwork-card-loading { pointer-events: none; }
+.artwork-card-loading .artwork-image-wrap { background: #eceff1; }
+.artwork-loading-line {
+  background: #eceff1;
+  border-radius: 999px;
+  display: block;
+  height: 8px;
+}
+.artwork-loading-title { width: 72%; }
+.artwork-loading-artist { width: 46%; }
 .artwork-image-wrap { background: var(--soft); min-height: 0; overflow: hidden; }
 .artwork-image { height: 100%; object-fit: cover; width: 100%; }
 
