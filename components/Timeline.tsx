@@ -182,7 +182,6 @@ export function Timeline({
   series,
   queries,
   metric,
-  countingUnit,
   label = metric.label,
   description = metric.description,
   selection,
@@ -1014,13 +1013,9 @@ export function Timeline({
           )}
           <div className="chart-hover-preview-copy">
             <strong style={{ color: hoverPlot.color }}>
-              {hoverPreviewContent.conceptLabel} · {hoverPreviewContent.periodLabel}
+              {hoverPreviewContent.conceptLabel}
             </strong>
-            <span>
-              · {hoverPoint.objectCount} {countingUnit === "catalog-record"
-                ? `catalog record${hoverPoint.objectCount === 1 ? "" : "s"}`
-                : `work${hoverPoint.objectCount === 1 ? "" : "s"}`}
-            </span>
+            <span>{hoverPoint.objectCount} records</span>
           </div>
         </div>
       )}
