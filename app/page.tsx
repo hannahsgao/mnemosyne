@@ -777,7 +777,7 @@ export default function Home() {
                     onChange={(event) => setInput(event.target.value)}
                     placeholder={SEARCH_PLACEHOLDERS[searchMode]}
                     maxLength={MAX_QUERY_LENGTH}
-                    aria-describedby="query-help"
+                    aria-describedby="search-mode-help"
                   />
                 </div>
                 <button type="submit" disabled={loading}>
@@ -786,8 +786,10 @@ export default function Home() {
               </form>
             </div>
 
-            <div className="query-row" id="query-help">
-              <span className="search-mode-help">{SEARCH_MODE_HELP[searchMode]}</span>
+            <div className="query-row">
+              <span className="search-mode-help" id="search-mode-help">
+                {SEARCH_MODE_HELP[searchMode]}
+              </span>
               <span>Try:</span>
               {exampleQueries.map((example) => (
                 <button key={example} type="button" onClick={() => void search(example, searchMode)}>{example}</button>

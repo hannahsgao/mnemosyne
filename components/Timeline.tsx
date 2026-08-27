@@ -1041,7 +1041,7 @@ export function Timeline({
                   aria-current={selected ? "true" : undefined}
                 >
                   <i className="legend-swatch" style={{ background: color }} />
-                  {query.label}
+                  <span className="legend-label">{query.label}</span>
                 </button>
                 <button
                   className="legend-visibility"
