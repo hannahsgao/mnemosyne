@@ -13,10 +13,31 @@ const HOVER_SLICE_PRIORITY = [
   "strongest",
 ] as const satisfies readonly EvidenceSliceName[];
 
+const NGA_IIIF_ORIGIN = "https://api.nga.gov";
+const NGA_HOVER_IMAGE_SIZE = "!264,216";
+
 type ArtworkPreview = {
   selection: ChartSelection;
   artwork: EvidenceArtwork;
 };
+
+/** Request a 2x hover-sized NGA derivative without changing gallery artwork URLs. */
+export function hoverPreviewImageUrl(imageUrl: string | null | undefined) {
+  if (!imageUrl) return null;
+  try {
+    const url = new URL(imageUrl);
+    if (url.origin !== NGA_IIIF_ORIGIN || url.search || url.hash) return imageUrl;
+    const resizedPath = url.pathname.replace(
+      /^(\/iiif\/[^/]+\/full\/)[^/]+(\/0\/default\.jpg)$/,
+      `$1${NGA_HOVER_IMAGE_SIZE}$2`,
+    );
+    if (resizedPath === url.pathname) return imageUrl;
+    url.pathname = resizedPath;
+    return url.toString();
+  } catch {
+    return imageUrl;
+  }
+}
 
 export function resolveHoverPreviewContent(
   selection: ChartSelection | null | undefined,

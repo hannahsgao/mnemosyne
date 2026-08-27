@@ -19,7 +19,7 @@ import type {
   SeriesPoint,
   TimeBin,
 } from "../lib/types";
-import { resolveHoverPreviewContent } from "../lib/hover-preview";
+import { hoverPreviewImageUrl, resolveHoverPreviewContent } from "../lib/hover-preview";
 import {
   contiguousTimelineRuns,
   dataTimelineViewport,
@@ -800,7 +800,7 @@ export function Timeline({
     Math.abs(boundedViewport.end - fittedViewport.end) > 0.01;
   const previewReady = previewKey !== null && readyPreviewKey === previewKey;
   const previewFailed = previewKey !== null && failedPreviewKey === previewKey;
-  const previewImageUrl = matchingHoverPreview?.artwork.imageUrl || null;
+  const previewImageUrl = hoverPreviewImageUrl(matchingHoverPreview?.artwork.imageUrl);
 
   return (
     <div
@@ -1004,6 +1004,7 @@ export function Timeline({
               width="132"
               height="92"
               decoding="async"
+              fetchPriority="high"
               onLoad={() => setReadyPreviewKey(previewKey)}
               onError={() => {
                 setReadyPreviewKey(null);
