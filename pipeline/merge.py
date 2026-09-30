@@ -34,7 +34,11 @@ from .dates import (
     parse_year,
     uniform_bin_weights,
 )
-from .embeddings import EMBED_SCHEMA_VERSION, SIGLIP_IMAGE_INPUT_POLICY
+from .embeddings import (
+    EMBED_SCHEMA_VERSION,
+    SIGLIP_IMAGE_INPUT_POLICY,
+    _validate_source_provenance_payload,
+)
 from .repack import (
     _declared_path,
     _ordered_rows,
@@ -92,6 +96,7 @@ _OPERATIONAL_MODEL_SETTINGS = frozenset(
         "merged_from_completed_bundles",
         "max_image_bytes",
         "max_image_pixels",
+        "request_delay_seconds",
         "request_timeout_seconds",
     }
 )
@@ -428,6 +433,22 @@ def _validate_rights_and_order(
             "permission_status", ""
         ).strip():
             raise CorpusBuildError(f"{artwork_id}: embedded permission status differs")
+        permission_status = image.get("permission_status", "").strip()
+        if permission_status not in {
+            "public-domain",
+            "explicitly-permitted",
+            "unreviewed",
+        }:
+            raise CorpusBuildError(
+                f"{artwork_id}: image permission status is missing or invalid"
+            )
+        if (
+            permission_status in {"public-domain", "explicitly-permitted"}
+            and not image.get("image_rights_uri", "").strip()
+        ):
+            raise CorpusBuildError(
+                f"{artwork_id}: permitted image is missing image_rights_uri"
+            )
         image_policy = image.get(IMAGE_INPUT_POLICY_FIELD, "").strip()
         if image_policy and embedded.get("input_policy", "").strip() != image_policy:
             raise CorpusBuildError(
@@ -649,10 +670,7 @@ def _load_bundle(root: Path) -> _SourceBundle:
             raise CorpusBuildError(
                 f"source provenance is not covered by artifact checksums: {relative}"
             )
-        try:
-            json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            raise CorpusBuildError(f"source provenance is invalid JSON: {path}") from exc
+        _validate_source_provenance_payload(path)
         provenance_paths.append(path)
 
     model = model_manifest.get("model")

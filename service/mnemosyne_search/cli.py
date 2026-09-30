@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 import sys
+import time
 
 from .artifacts import ArtifactBundle
 from .cache import InMemorySeriesCache
@@ -68,6 +69,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         default=os.environ.get("MNEMOSYNE_LOG_LEVEL", "INFO").upper(),
         help="process log level (default: INFO)",
+    )
+    parser.add_argument(
+        "--trust-hydration-verification",
+        action="store_true",
+        help=(
+            "trust the manifest-bound verification stamp written by the production "
+            "hydrator and skip duplicate checksum and embedding-norm scans"
+        ),
     )
     index = parser.add_mutually_exclusive_group()
     index.add_argument("--no-faiss", action="store_true")
@@ -177,15 +186,30 @@ def main(argv: list[str] | None = None) -> int:
             config=MetKeywordConfig(search_mode=args.met_search_mode),
         )
     else:
-        artifacts = ArtifactBundle.load(args.artifacts)
+        startup_logger = logging.getLogger("mnemosyne_search.startup")
+        phase_started = time.perf_counter()
+        artifacts = ArtifactBundle.load(
+            args.artifacts,
+            trust_hydration_verification=args.trust_hydration_verification,
+        )
+        startup_logger.info(
+            "loaded artifact bundle in %.3fs (trusted hydration: %s)",
+            time.perf_counter() - phase_started,
+            args.trust_hydration_verification,
+        )
         if args.fixture_vectors:
             text_encoder = FixtureTextEncoder.from_json(args.fixture_vectors)
         else:
+            phase_started = time.perf_counter()
             text_encoder = Siglip2TextEncoder(
                 artifacts.model_id,
                 revision=artifacts.model_version,
                 device=args.device,
                 local_files_only=not args.allow_model_download,
+            )
+            startup_logger.info(
+                "loaded SigLIP 2 text encoder in %.3fs",
+                time.perf_counter() - phase_started,
             )
         prompts = PromptEnsemble(
             version=args.prompt_version,

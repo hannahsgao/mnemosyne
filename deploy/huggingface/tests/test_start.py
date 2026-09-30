@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
+
+from mnemosyne_search.verification import validate_verified_hydration
 
 
 START_PATH = Path(__file__).resolve().parents[1] / "start.py"
@@ -56,7 +59,7 @@ def manifest_payload() -> dict[str, object]:
             {
                 "path": f"payload/{index}.bin",
                 "bytes": 1,
-                "sha256": "0" * 64,
+                "sha256": hashlib.sha256(b"x").hexdigest(),
             }
             for index in range(start.EXPECTED_ARTIFACT_COUNT)
         ],
@@ -148,6 +151,14 @@ class HydrationTests(unittest.TestCase):
             self.assertEqual((destination / "payload" / "0.bin").read_bytes(), b"x")
             self.assertTrue((destination / start.HYDRATION_MARKER).is_file())
             self.assertEqual((source / "payload" / "0.bin").read_bytes(), b"x")
+            manifest = start.load_and_validate_manifest(destination)
+            self.assertTrue(
+                validate_verified_hydration(
+                    destination,
+                    destination / start.MANIFEST_NAME,
+                    manifest,
+                )
+            )
 
     def test_copy_failure_leaves_no_visible_or_temporary_destination(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -156,12 +167,36 @@ class HydrationTests(unittest.TestCase):
             destination = root / "local" / "artifacts"
             write_bundle(source)
 
-            with mock.patch.object(start.shutil, "copy2", side_effect=OSError("disk full")):
+            with mock.patch.object(
+                start, "_copy_verified_artifact", side_effect=OSError("disk full")
+            ):
                 with self.assertRaisesRegex(OSError, "disk full"):
                     start.hydrate_artifacts(source, destination)
 
             self.assertFalse(destination.exists())
             self.assertEqual(list(destination.parent.iterdir()), [])
+
+    def test_rejects_payload_whose_checksum_changed_without_changing_size(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            source = root / "source"
+            write_bundle(source)
+            (source / "payload" / "0.bin").write_bytes(b"y")
+
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                start.hydrate_artifacts(source, root / "local")
+
+    def test_completed_hydration_is_stale_after_payload_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            source = root / "source"
+            destination = root / "local"
+            write_bundle(source)
+            start.hydrate_artifacts(source, destination)
+
+            (destination / "payload" / "0.bin").write_bytes(b"y")
+
+            self.assertFalse(start._is_completed_hydration(destination))
 
     def test_source_file_symlink_cannot_escape_bundle_root(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -190,6 +225,7 @@ class RuntimeProfileTests(unittest.TestCase):
         self.assertEqual(argv[0], "mnemosyne-search")
         self.assertIn("--siglip2", argv)
         self.assertIn("--no-faiss", argv)
+        self.assertIn("--trust-hydration-verification", argv)
         self.assertEqual(argv[argv.index("--device") + 1], "cpu")
         self.assertEqual(argv[argv.index("--port") + 1], "7860")
         self.assertEqual(argv[argv.index("--http-auth-mode") + 1], "disabled")

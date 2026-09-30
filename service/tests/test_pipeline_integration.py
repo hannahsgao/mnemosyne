@@ -30,6 +30,7 @@ class PipelineToSearchIntegrationTests(unittest.TestCase):
                 "date_end_bce",
                 "image_url",
                 "public_domain",
+                "image_rights_uri",
             )
             with source.open("w", encoding="utf-8", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
@@ -45,6 +46,9 @@ class PipelineToSearchIntegrationTests(unittest.TestCase):
                             "date_end_bce": "false",
                             "image_url": f"https://example.test/{index}.jpg",
                             "public_domain": "true",
+                            "image_rights_uri": (
+                                "https://creativecommons.org/publicdomain/zero/1.0/"
+                            ),
                         }
                     )
 

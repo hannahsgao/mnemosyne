@@ -1,18 +1,75 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
 from mnemosyne_search.artifacts import ArtifactBundle, SparseDateWeights
+from mnemosyne_search.verification import write_verified_hydration
+
+
+def write_fixture_verification(root: Path) -> tuple[Path, dict[str, object]]:
+    manifest_path = root / "build-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    embeddings = root / "embeddings.json"
+    manifest["artifacts"] = [
+        {
+            "path": embeddings.name,
+            "bytes": embeddings.stat().st_size,
+            "sha256": hashlib.sha256(embeddings.read_bytes()).hexdigest(),
+        }
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    write_verified_hydration(root, manifest_path, manifest)
+    return manifest_path, manifest
 
 
 class PipelineArtifactContractTests(unittest.TestCase):
+    def test_trusted_hydration_skips_duplicate_checksum_and_norm_scans(self) -> None:
+        fixtures = Path(__file__).parent / "fixtures"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "bundle"
+            shutil.copytree(fixtures, root)
+            write_fixture_verification(root)
+
+            with mock.patch.object(
+                ArtifactBundle,
+                "_verify_artifacts",
+                wraps=ArtifactBundle._verify_artifacts,
+            ) as verify_artifacts, mock.patch(
+                "mnemosyne_search.artifacts.np.linalg.norm",
+                side_effect=AssertionError("duplicate norm scan"),
+            ):
+                bundle = ArtifactBundle.load(
+                    root,
+                    trust_hydration_verification=True,
+                )
+
+            self.assertEqual(bundle.embeddings.shape, (10, 4))
+            self.assertFalse(verify_artifacts.call_args.kwargs["verify_checksums"])
+
+    def test_trusted_hydration_rejects_a_stale_file_stamp(self) -> None:
+        fixtures = Path(__file__).parent / "fixtures"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "bundle"
+            shutil.copytree(fixtures, root)
+            write_fixture_verification(root)
+            embeddings = root / "embeddings.json"
+            stat = embeddings.stat()
+            embeddings.touch()
+            if embeddings.stat().st_mtime_ns == stat.st_mtime_ns:
+                embeddings.write_bytes(embeddings.read_bytes() + b"\n")
+
+            with self.assertRaisesRegex(ValueError, "missing or stale"):
+                ArtifactBundle.load(root, trust_hydration_verification=True)
+
     def test_rejects_an_artifact_with_a_bad_checksum(self) -> None:
         fixtures = Path(__file__).parent / "fixtures"
         with tempfile.TemporaryDirectory() as temporary:

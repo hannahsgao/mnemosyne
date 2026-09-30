@@ -3,33 +3,39 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 from pathlib import Path, PurePosixPath
 import shutil
 import tempfile
+import time
 from typing import Any, Mapping
 
 
-RELEASE_NAME = "met-nga-openaccess-199474-siglip2-v1"
+RELEASE_NAME = "met-nga-cma-openaccess-240278-siglip2-v1"
 ARTIFACT_SOURCE = Path("/artifacts/releases") / RELEASE_NAME
 LOCAL_ARTIFACTS = Path("/tmp/mnemosyne-artifacts")
 MANIFEST_NAME = "model-manifest.json"
-HYDRATION_MARKER = ".mnemosyne-hydrated"
+HYDRATION_MARKER = ".mnemosyne-verified-hydration.json"
+HYDRATION_SCHEMA = "mnemosyne.verified-hydration.v1"
 
 EXPECTED_SCHEMA_VERSION = "mnemosyne-embedding-build/v1"
 EXPECTED_CORPUS_ID = RELEASE_NAME
-EXPECTED_CORPUS_LABEL = "The Met and National Gallery of Art open-access image catalog"
-EXPECTED_CORPUS_COUNT = 199_474
+EXPECTED_CORPUS_LABEL = (
+    "The Met, National Gallery of Art, and Cleveland Museum of Art "
+    "open-access image catalog"
+)
+EXPECTED_CORPUS_COUNT = 240_278
 EXPECTED_COUNTING_UNIT = "catalog-record"
 EXPECTED_MODEL_ID = "google/siglip2-base-patch16-224"
 EXPECTED_MODEL_REVISION = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"
-EXPECTED_ROWS = 199_474
+EXPECTED_ROWS = 240_278
 EXPECTED_DIMENSIONS = 768
-EXPECTED_ARTIFACT_COUNT = 17
+EXPECTED_ARTIFACT_COUNT = 24
 EXPECTED_MERGE_SOURCES = (
-    (0, ("met",), 0, 142_482, 142_482),
-    (1, ("nga",), 142_482, 199_474, 56_992),
+    (0, ("met", "nga"), 0, 199_474, 199_474),
+    (1, ("cma",), 199_474, 240_278, 40_804),
 )
 
 PORT = 7860
@@ -62,6 +68,13 @@ def _artifact_paths(manifest: Mapping[str, Any]) -> tuple[PurePosixPath, ...]:
             raise ValueError("artifact manifest paths must stay within the bundle root")
         if not isinstance(item.get("bytes"), int) or int(item["bytes"]) < 0:
             raise ValueError(f"artifact manifest byte count is invalid: {raw_path}")
+        digest = item.get("sha256")
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdefABCDEF" for character in digest)
+        ):
+            raise ValueError(f"artifact manifest checksum is invalid: {raw_path}")
         if path in paths:
             raise ValueError(f"artifact manifest path is duplicated: {raw_path}")
         paths.append(path)
@@ -162,19 +175,82 @@ def _validate_source_files(source: Path, manifest: Mapping[str, Any]) -> None:
             raise ValueError(f"artifact file has the wrong byte count: {relative_path}")
 
 
-def _marker_payload() -> str:
-    return f"{EXPECTED_CORPUS_ID}\n{EXPECTED_MODEL_ID}@{EXPECTED_MODEL_REVISION}\n"
-
-
 def _is_completed_hydration(destination: Path) -> bool:
-    marker = destination / HYDRATION_MARKER
     try:
-        if marker.read_text(encoding="utf-8") != _marker_payload():
-            return False
-        load_and_validate_manifest(destination)
-    except (OSError, UnicodeDecodeError, ValueError):
+        manifest = load_and_validate_manifest(destination)
+        actual = json.loads(
+            (destination / HYDRATION_MARKER).read_text(encoding="utf-8")
+        )
+        expected = _verification_payload(destination, manifest)
+        return actual == expected
+    except (OSError, ValueError):
         return False
-    return True
+
+
+def _verification_payload(
+    root: Path, manifest: Mapping[str, Any]
+) -> dict[str, object]:
+    manifest_digest = hashlib.sha256((root / MANIFEST_NAME).read_bytes()).hexdigest()
+    artifacts: list[dict[str, str | int]] = []
+    resolved_root = root.resolve()
+    for item in manifest["artifacts"]:
+        relative_path = PurePosixPath(str(item["path"]))
+        path = root.joinpath(*relative_path.parts).resolve(strict=True)
+        try:
+            path.relative_to(resolved_root)
+        except ValueError as error:
+            raise ValueError("artifact manifest path escapes the bundle root") from error
+        if not path.is_file():
+            raise ValueError(f"manifest-declared artifact is not a file: {relative_path}")
+        stat = path.stat()
+        artifacts.append(
+            {
+                "path": str(relative_path),
+                "bytes": stat.st_size,
+                "sha256": str(item["sha256"]).lower(),
+                "mtimeNs": stat.st_mtime_ns,
+                "ctimeNs": stat.st_ctime_ns,
+            }
+        )
+    return {
+        "schemaVersion": HYDRATION_SCHEMA,
+        "manifestSha256": manifest_digest,
+        "artifacts": artifacts,
+    }
+
+
+def _write_verified_hydration(root: Path, manifest: Mapping[str, Any]) -> None:
+    marker = root / HYDRATION_MARKER
+    marker.write_text(
+        json.dumps(
+            _verification_payload(root, manifest),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _copy_verified_artifact(
+    source: Path,
+    destination: Path,
+    *,
+    expected_bytes: int,
+    expected_sha256: str,
+) -> None:
+    digest = hashlib.sha256()
+    copied_bytes = 0
+    with source.open("rb") as source_handle, destination.open("wb") as destination_handle:
+        for chunk in iter(lambda: source_handle.read(1024 * 1024), b""):
+            destination_handle.write(chunk)
+            digest.update(chunk)
+            copied_bytes += len(chunk)
+    if copied_bytes != expected_bytes:
+        raise ValueError(f"artifact changed size while hydrating: {source.name}")
+    if digest.hexdigest() != expected_sha256.lower():
+        raise ValueError(f"artifact checksum does not match manifest: {source.name}")
+    shutil.copystat(source, destination)
 
 
 def hydrate_artifacts(source: Path, destination: Path) -> Path:
@@ -185,6 +261,7 @@ def hydrate_artifacts(source: Path, destination: Path) -> Path:
     if not source.is_dir():
         raise ValueError("artifact source mount is unavailable")
 
+    started = time.perf_counter()
     manifest = load_and_validate_manifest(source)
     _validate_source_files(source, manifest)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -203,18 +280,32 @@ def hydrate_artifacts(source: Path, destination: Path) -> Path:
     )
     try:
         shutil.copy2(source / MANIFEST_NAME, temporary / MANIFEST_NAME)
+        entries = {
+            PurePosixPath(str(item["path"])): item
+            for item in manifest["artifacts"]
+        }
         for relative_path in _artifact_paths(manifest):
             source_path = source.joinpath(*relative_path.parts)
             destination_path = temporary.joinpath(*relative_path.parts)
             destination_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, destination_path)
-        (temporary / HYDRATION_MARKER).write_text(_marker_payload(), encoding="utf-8")
+            entry = entries[relative_path]
+            _copy_verified_artifact(
+                source_path,
+                destination_path,
+                expected_bytes=int(entry["bytes"]),
+                expected_sha256=str(entry["sha256"]),
+            )
+        _write_verified_hydration(temporary, manifest)
         os.replace(temporary, destination)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
 
-    _LOGGER.info("artifact hydration completed")
+    _LOGGER.info(
+        "artifact hydration copied and verified %d files in %.3fs",
+        len(entries),
+        time.perf_counter() - started,
+    )
     return destination
 
 
@@ -241,6 +332,7 @@ def service_argv(artifacts: Path) -> list[str]:
         "--device",
         "cpu",
         "--no-faiss",
+        "--trust-hydration-verification",
     ]
 
 
@@ -249,6 +341,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    startup_started = time.perf_counter()
     local_artifacts = hydrate_artifacts(ARTIFACT_SOURCE, LOCAL_ARTIFACTS)
     argv = service_argv(local_artifacts)
     _LOGGER.info(
@@ -256,6 +349,7 @@ def main() -> None:
         PORT,
         HTTP_ADMISSION_LIMIT,
     )
+    _LOGGER.info("startup wrapper completed in %.3fs", time.perf_counter() - startup_started)
     os.execvp(argv[0], argv)
 
 

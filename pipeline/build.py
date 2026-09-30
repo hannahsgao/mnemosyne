@@ -254,13 +254,66 @@ def _write_csv(path: Path, fields: Sequence[str], rows: Iterable[Mapping[str, ob
         writer.writerows(rows)
 
 
-def _write_parquet_if_available(path: Path, fields: Sequence[str], rows: list[Mapping[str, object]]) -> bool:
+_PARQUET_INT64_FIELDS = frozenset(
+    {
+        "date_start",
+        "date_end",
+        "embedding_offset",
+        "bin_index",
+        "bin_start",
+        "bin_end",
+        "physical_object_count",
+        "visual_cluster_count",
+        "row_count",
+        "dated_count",
+        "public_domain_count",
+        "image_count",
+    }
+)
+_PARQUET_BOOL_FIELDS = frozenset({"public_domain", "image_available"})
+
+
+def _write_parquet_if_available(
+    path: Path, fields: Sequence[str], rows: list[Mapping[str, object]]
+) -> bool:
     try:
         import pyarrow as pa  # type: ignore[import-not-found]
         import pyarrow.parquet as pq  # type: ignore[import-not-found]
     except ImportError:
         return False
-    table = pa.Table.from_pylist([{field: row.get(field) for field in fields} for row in rows])
+
+    # Do not let row order decide the Parquet schema. Canonical nullable dates
+    # are represented as integers or blank strings for CSV compatibility, and
+    # PyArrow cannot safely infer that mixed representation. Explicit arrays
+    # also preserve the schema of valid zero-row tables such as denominators
+    # for an entirely undated corpus.
+    arrays = []
+    for field in fields:
+        if field in _PARQUET_INT64_FIELDS:
+            field_type = pa.int64()
+            values = [
+                None if row.get(field) in (None, "") else row.get(field)
+                for row in rows
+            ]
+        elif field in _PARQUET_BOOL_FIELDS:
+            field_type = pa.bool_()
+            values = [
+                None if row.get(field) in (None, "") else row.get(field)
+                for row in rows
+            ]
+        else:
+            field_type = pa.string()
+            values = [
+                None if row.get(field) is None else str(row.get(field))
+                for row in rows
+            ]
+        try:
+            arrays.append(pa.array(values, type=field_type))
+        except (pa.ArrowInvalid, pa.ArrowTypeError) as exc:
+            raise CorpusBuildError(
+                f"cannot encode Parquet field {field!r} as {field_type}"
+            ) from exc
+    table = pa.Table.from_arrays(arrays, names=list(fields))
     pq.write_table(table, path, compression="zstd", use_dictionary=True)
     return True
 
@@ -347,12 +400,16 @@ def _coverage_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
 def _image_rows(raw_rows: list[dict[str, str]], canonical_rows: list[dict[str, object]]) -> list[dict[str, object]]:
     output = []
     for raw, canonical in zip(raw_rows, canonical_rows, strict=True):
-        rights_uri = str(canonical["image_rights_uri"])
+        rights_uri = str(canonical["image_rights_uri"]).strip()
         public_domain = canonical["public_domain"] is True
         explicit_permission = parse_bool(raw.get("image_use_permitted"))
-        if public_domain:
+        # Image availability and a work-level public-domain flag are not, on
+        # their own, enough to establish permission for the digital image. A
+        # source adapter must preserve the exact image-level rights assertion
+        # that justified admitting the asset.
+        if public_domain and rights_uri:
             status = "public-domain"
-        elif explicit_permission:
+        elif explicit_permission and rights_uri:
             status = "explicitly-permitted"
         else:
             status = "unreviewed"

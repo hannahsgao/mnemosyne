@@ -556,7 +556,8 @@ def derive_embedded_corpus(
             replaced_declared_hashes += 1
         input_hashes.add(input_sha256)
         permission_status = embedded_row.get("permission_status", "").strip()
-        permitted = _truthy(corpus_row.get("public_domain", "")) or permission_status in {
+        rights_uri = corpus_row.get("image_rights_uri", "").strip()
+        permitted = bool(rights_uri) and permission_status in {
             "public-domain",
             "explicitly-permitted",
         }

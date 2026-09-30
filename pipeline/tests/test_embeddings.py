@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import csv
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 import hashlib
 from io import BytesIO
 import json
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +17,7 @@ import numpy as np
 
 from pipeline.build import CorpusBuildError, build_corpus
 from pipeline.embeddings import (
+    AIC_IMAGE_INPUT_POLICY,
     DECLARED_REMOTE_IMAGE_INPUT_POLICY,
     DeterministicTestEncoder,
     SIGLIP_IMAGE_INPUT_POLICY,
@@ -23,7 +27,20 @@ from pipeline.embeddings import (
 
 
 class EmbeddingBuildTests(unittest.TestCase):
-    def _build_corpus(self, root: Path) -> Path:
+    def test_stream_encoder_rejects_nonfinite_request_delays_before_model_load(self) -> None:
+        for delay in (float("nan"), float("inf"), -1.0):
+            with self.subTest(delay=delay), self.assertRaisesRegex(
+                CorpusBuildError, "delay/retries non-negative"
+            ):
+                Siglip2LocalEncoder(
+                    "model-that-must-not-load",
+                    "pinned-revision",
+                    request_delay_seconds=delay,
+                )
+
+    def _build_corpus(
+        self, root: Path, extra_source_payloads: tuple[Path, ...] = ()
+    ) -> Path:
         source = root / "ArtiFact_clean.csv"
         fields = (
             "object_ID",
@@ -34,6 +51,7 @@ class EmbeddingBuildTests(unittest.TestCase):
             "date_end_bce",
             "image_url",
             "public_domain",
+            "image_rights_uri",
         )
         with source.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
@@ -49,6 +67,7 @@ class EmbeddingBuildTests(unittest.TestCase):
                         "date_end_bce": "false",
                         "image_url": "https://example.test/20.jpg",
                         "public_domain": "true",
+                        "image_rights_uri": "https://creativecommons.org/publicdomain/zero/1.0/",
                     },
                     {
                         "object_ID": "AIC_10",
@@ -59,6 +78,7 @@ class EmbeddingBuildTests(unittest.TestCase):
                         "date_end_bce": "false",
                         "image_url": "https://example.test/10.jpg",
                         "public_domain": "true",
+                        "image_rights_uri": "https://creativecommons.org/publicdomain/zero/1.0/",
                     },
                 ]
             )
@@ -69,8 +89,97 @@ class EmbeddingBuildTests(unittest.TestCase):
             corpus_version="fixture-v1",
             source_revision="deadbeef",
             retrieved_at="2026-08-03T00:00:00Z",
+            source_payloads=(source, *extra_source_payloads),
         )
         return corpus_dir
+
+    def test_embedding_carries_json_and_availability_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            audit = root / "source.manifest.json"
+            audit.write_text('{"rights_gate":"fixture"}\n', encoding="utf-8")
+            availability = root / "source.availability.csv"
+            availability.write_text(
+                "artwork_id,image_url,available,reason\n"
+                "AIC_10,https://example.test/10.jpg,true,\n",
+                encoding="utf-8",
+            )
+            corpus_dir = self._build_corpus(root, (audit, availability))
+            output = root / "embeddings"
+
+            manifest = build_embedding_index(
+                corpus_dir,
+                output,
+                DeterministicTestEncoder(8),
+                write_faiss=False,
+            )
+
+            self.assertEqual(
+                manifest["files"]["sourceProvenance"],
+                [
+                    "source-provenance/source.availability.csv",
+                    "source-provenance/source.manifest.json",
+                ],
+            )
+            for relative in manifest["files"]["sourceProvenance"]:
+                self.assertTrue((output / relative).is_file())
+            artifact_paths = {entry["path"] for entry in manifest["artifacts"]}
+            self.assertIn(
+                "source-provenance/source.availability.csv", artifact_paths
+            )
+
+    def test_embedding_rejects_permitted_status_without_image_rights_uri(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            corpus_dir = self._build_corpus(root)
+            image_manifest = corpus_dir / "images.manifest.csv"
+            with image_manifest.open(encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                rows = list(reader)
+                fields = tuple(reader.fieldnames or ())
+            rows[0]["image_rights_uri"] = ""
+            with image_manifest.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(rows)
+
+            with self.assertRaisesRegex(
+                CorpusBuildError,
+                "image rights differ between corpus and image manifest",
+            ):
+                build_embedding_index(
+                    corpus_dir,
+                    root / "embeddings",
+                    DeterministicTestEncoder(8),
+                )
+
+    def test_embedding_fails_closed_when_all_rights_fields_are_blank(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            corpus_dir = self._build_corpus(root)
+            for name in ("corpus.csv", "images.manifest.csv"):
+                path = corpus_dir / name
+                with path.open(encoding="utf-8", newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    rows = list(reader)
+                    fields = tuple(reader.fieldnames or ())
+                rows[0]["image_rights_uri"] = ""
+                with path.open("w", encoding="utf-8", newline="") as handle:
+                    writer = csv.DictWriter(
+                        handle, fieldnames=fields, lineterminator="\n"
+                    )
+                    writer.writeheader()
+                    writer.writerows(rows)
+
+            with self.assertRaisesRegex(
+                CorpusBuildError,
+                "image rights are unreviewed or missing",
+            ):
+                build_embedding_index(
+                    corpus_dir,
+                    root / "embeddings",
+                    DeterministicTestEncoder(8),
+                )
 
     def test_deterministic_encoder_is_normalized_and_in_corpus_order(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -305,6 +414,82 @@ class EmbeddingBuildTests(unittest.TestCase):
         )
         self.assertEqual(policy, DECLARED_REMOTE_IMAGE_INPUT_POLICY)
 
+    def test_remote_request_delay_paces_request_starts(self) -> None:
+        class FakeOpener:
+            def open(self, request, *, timeout):
+                del request, timeout
+                return object()
+
+        encoder = Siglip2LocalEncoder.__new__(Siglip2LocalEncoder)
+        encoder._request_delay_seconds = 1.0
+        encoder._request_rate_lock = threading.Lock()
+        encoder._next_request_at = 0.0
+        encoder._request_timeout = 30
+        encoder._url_opener = FakeOpener()
+        request = object()
+
+        with (
+            patch("pipeline.embeddings.time.monotonic", side_effect=(100.0, 100.2)),
+            patch("pipeline.embeddings.time.sleep") as sleep,
+        ):
+            encoder._open_remote_request(request)
+            encoder._open_remote_request(request)
+
+        sleep.assert_called_once()
+        self.assertAlmostEqual(sleep.call_args.args[0], 0.8)
+
+    def test_remote_request_delay_is_strict_across_concurrent_workers(self) -> None:
+        starts: list[float] = []
+
+        class FakeOpener:
+            def open(self, request, *, timeout):
+                del request, timeout
+                starts.append(time.monotonic())
+                return object()
+
+        encoder = Siglip2LocalEncoder.__new__(Siglip2LocalEncoder)
+        encoder._request_delay_seconds = 0.02
+        encoder._request_rate_lock = threading.Lock()
+        encoder._next_request_at = 0.0
+        encoder._request_timeout = 30
+        encoder._url_opener = FakeOpener()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(encoder._open_remote_request, (object(), object())))
+
+        self.assertEqual(len(starts), 2)
+        self.assertGreaterEqual(starts[1] - starts[0], 0.015)
+
+    def test_aic_embedding_enforces_its_download_policy(self) -> None:
+        encoder = Siglip2LocalEncoder.__new__(Siglip2LocalEncoder)
+        records = ({"image_input_policy": AIC_IMAGE_INPUT_POLICY},)
+
+        encoder._download_workers = 2
+        encoder._request_delay_seconds = 1.0
+        with self.assertRaisesRegex(CorpusBuildError, "download-workers 1"):
+            encoder._validate_source_request_policy(records)
+
+        encoder._download_workers = 1
+        encoder._request_delay_seconds = 0.5
+        with self.assertRaisesRegex(CorpusBuildError, "delay-seconds 1"):
+            encoder._validate_source_request_policy(records)
+
+        encoder._request_delay_seconds = 1.0
+        encoder._validate_source_request_policy(records)
+
+    def test_aic_image_requests_include_the_museum_project_header(self) -> None:
+        aic_headers = Siglip2LocalEncoder._remote_request_headers(
+            "https://www.artic.edu/iiif/2/example/full/843,/0/default.jpg"
+        )
+        other_headers = Siglip2LocalEncoder._remote_request_headers(
+            "https://images.metmuseum.org/example.jpg"
+        )
+
+        self.assertEqual(
+            aic_headers["AIC-User-Agent"], "Mnemosyne embedding corpus builder"
+        )
+        self.assertNotIn("AIC-User-Agent", other_headers)
+
     def test_met_web_large_falls_back_to_original_below_model_floor(self) -> None:
         from PIL import Image
 
@@ -403,6 +588,8 @@ class EmbeddingBuildTests(unittest.TestCase):
                 allowed_hosts: tuple[str, ...] = ("example.test",),
                 max_image_bytes: int = 1024 * 1024,
                 max_image_pixels: int = 10_000,
+                download_workers: int = 2,
+                request_delay_seconds: float = 0,
             ) -> Siglip2LocalEncoder:
                 encoder = Siglip2LocalEncoder.__new__(Siglip2LocalEncoder)
                 encoder.encoder_id = "fake/siglip"
@@ -412,7 +599,10 @@ class EmbeddingBuildTests(unittest.TestCase):
                 encoder._processor = FakeProcessor()
                 encoder._model = FakeModel()
                 encoder._device = device
-                encoder._download_workers = 2
+                encoder._download_workers = download_workers
+                encoder._request_timeout = 30
+                encoder._request_delay_seconds = request_delay_seconds
+                encoder._fetch_retries = 2
                 encoder._max_image_bytes = max_image_bytes
                 encoder._max_image_pixels = max_image_pixels
                 encoder._allowed_image_hosts = allowed_hosts
@@ -458,6 +648,8 @@ class EmbeddingBuildTests(unittest.TestCase):
                 {"allowed_hosts": ("cdn.example.test",)},
                 {"max_image_bytes": 2 * 1024 * 1024},
                 {"max_image_pixels": 20_000},
+                {"download_workers": 1},
+                {"request_delay_seconds": 0.5},
             ):
                 with self.subTest(changed_setting=changed_setting):
                     with self.assertRaisesRegex(
@@ -527,6 +719,9 @@ class EmbeddingBuildTests(unittest.TestCase):
         encoder._model = FakeModel()
         encoder._device = "cpu"
         encoder._download_workers = 2
+        encoder._request_timeout = 30
+        encoder._request_delay_seconds = 0
+        encoder._fetch_retries = 2
         encoder._allowed_image_hosts = ("example.test",)
         encoder._max_image_bytes = 1024 * 1024
         encoder._max_image_pixels = 10_000

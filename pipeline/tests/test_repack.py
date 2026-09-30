@@ -36,6 +36,7 @@ class EmbeddedBundleRepackTests(unittest.TestCase):
             "image_path",
             "image_url",
             "image_sha256",
+            "image_rights_uri",
             "image_use_permitted",
         )
         rows = []
@@ -58,6 +59,7 @@ class EmbeddedBundleRepackTests(unittest.TestCase):
                     "image_path": str(image.relative_to(root)),
                     "image_url": f"https://images.metmuseum.org/original/{artwork_id}.jpg",
                     "image_sha256": declared,
+                    "image_rights_uri": "https://creativecommons.org/publicdomain/zero/1.0/",
                     "image_use_permitted": "true",
                 }
             )
@@ -88,6 +90,12 @@ class EmbeddedBundleRepackTests(unittest.TestCase):
 
         provenance = root / "reconciliation.json"
         provenance.write_text('{"rights_gate":"fixture"}\n', encoding="utf-8")
+        availability = root / "rebuilt.availability.csv"
+        availability.write_text(
+            "artwork_id,image_url,available,reason\n"
+            "MET_1,https://images.metmuseum.org/original/MET_1.jpg,true,\n",
+            encoding="utf-8",
+        )
         rebuilt_csv = self._input_csv(root, "rebuilt.csv")
         rebuilt_corpus = root / "rebuilt-corpus"
         build_corpus(
@@ -95,7 +103,7 @@ class EmbeddedBundleRepackTests(unittest.TestCase):
             rebuilt_corpus,
             corpus_version="reconciled-v2",
             source_revision="reconciled-revision",
-            source_payloads=(rebuilt_csv, provenance),
+            source_payloads=(rebuilt_csv, provenance, availability),
         )
         return source_bundle, rebuilt_corpus
 
@@ -118,6 +126,9 @@ class EmbeddedBundleRepackTests(unittest.TestCase):
                 np.dtype("float32"),
             )
             self.assertTrue((output / "source-provenance" / "reconciliation.json").is_file())
+            self.assertTrue(
+                (output / "source-provenance" / "rebuilt.availability.csv").is_file()
+            )
             self.assertEqual(
                 json.loads((output / "model-manifest.json").read_text(encoding="utf-8")),
                 manifest,
@@ -140,6 +151,9 @@ class EmbeddedBundleRepackTests(unittest.TestCase):
             artifact_paths = {entry["path"] for entry in manifest["artifacts"]}
             self.assertIn("embeddings.npy", artifact_paths)
             self.assertIn("source-provenance/reconciliation.json", artifact_paths)
+            self.assertIn(
+                "source-provenance/rebuilt.availability.csv", artifact_paths
+            )
             self.assertTrue(source_bundle.is_dir())
 
     def test_rejects_different_ordered_artwork_ids(self) -> None:

@@ -27,6 +27,7 @@ FIELDS = (
     "image_url",
     "image_path",
     "public_domain",
+    "image_rights_uri",
 )
 
 
@@ -55,6 +56,7 @@ class CorpusBuildTests(unittest.TestCase):
                 "image_url": "https://example.test/2.jpg",
                 "image_path": "images/2.jpg",
                 "public_domain": "true",
+                "image_rights_uri": "https://creativecommons.org/publicdomain/zero/1.0/",
             },
             {
                 "object_ID": "AIC_1",
@@ -71,6 +73,7 @@ class CorpusBuildTests(unittest.TestCase):
                 "image_url": "https://example.test/1.jpg",
                 "image_path": "images/1.jpg",
                 "public_domain": "false",
+                "image_rights_uri": "",
             },
             {
                 "object_ID": "RIJKS_3",
@@ -87,6 +90,7 @@ class CorpusBuildTests(unittest.TestCase):
                 "image_url": "https://example.test/3.jpg",
                 "image_path": "images/3.jpg",
                 "public_domain": "false",
+                "image_rights_uri": "",
             },
         ]
 
@@ -132,6 +136,98 @@ class CorpusBuildTests(unittest.TestCase):
                 images = {row["artwork_id"]: row for row in csv.DictReader(handle)}
             self.assertEqual(images["MET_2"]["permission_status"], "public-domain")
             self.assertEqual(images["AIC_1"]["permission_status"], "unreviewed")
+
+    def test_parquet_schema_keeps_nullable_dates_and_empty_denominators(self) -> None:
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError:
+            self.skipTest("PyArrow is not installed")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "ArtiFact_clean.csv"
+            rows = [
+                {
+                    **row,
+                    "date_begin": "",
+                    "date_end": "",
+                }
+                for row in self.fixture_rows()
+            ]
+            write_fixture(source, rows)
+            output = root / "build"
+
+            build_corpus(
+                source,
+                output,
+                corpus_version="all-undated-v1",
+                source_revision="deadbeef",
+                retrieved_at="2026-08-03T00:00:00Z",
+                require_parquet=True,
+            )
+
+            corpus = pq.read_table(output / "corpus.parquet")
+            self.assertEqual(corpus.schema.field("date_start").type, pa.int64())
+            self.assertEqual(corpus.schema.field("date_end").type, pa.int64())
+            self.assertEqual(corpus.column("date_start").to_pylist(), [None] * 3)
+            self.assertEqual(corpus.column("date_end").to_pylist(), [None] * 3)
+
+            denominators = pq.read_table(output / "bin-denominators.parquet")
+            self.assertEqual(denominators.num_rows, 0)
+            self.assertEqual(
+                denominators.schema.names,
+                [
+                    "bin_index",
+                    "bin_key",
+                    "bin_start",
+                    "bin_end",
+                    "bin_label",
+                    "eligible_weight",
+                    "physical_object_count",
+                    "visual_cluster_count",
+                ],
+            )
+            self.assertEqual(
+                denominators.schema.field("bin_index").type, pa.int64()
+            )
+
+    def test_image_permission_requires_an_exact_rights_assertion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.csv"
+            rows = [
+                {
+                    **self.fixture_rows()[0],
+                    "object_ID": "TEST_1",
+                    "public_domain": "true",
+                    "image_rights_uri": "",
+                },
+                {
+                    **self.fixture_rows()[0],
+                    "object_ID": "TEST_2",
+                    "public_domain": "false",
+                    "image_rights_uri": "",
+                    "image_use_permitted": "true",
+                },
+            ]
+            fields = (*FIELDS, "image_use_permitted")
+            write_fixture(source, rows, fields)
+
+            build_corpus(
+                source,
+                root / "build",
+                corpus_version="rights-fixture-v1",
+                source_revision="deadbeef",
+            )
+
+            with (root / "build" / "images.manifest.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                statuses = [
+                    row["permission_status"] for row in csv.DictReader(handle)
+                ]
+            self.assertEqual(statuses, ["unreviewed", "unreviewed"])
 
     def test_manifest_is_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

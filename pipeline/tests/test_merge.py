@@ -103,6 +103,12 @@ class EmbeddingBundleMergeTests(unittest.TestCase):
             json.dumps({"institution": institution, "rights_gate": "fixture"}) + "\n",
             encoding="utf-8",
         )
+        availability = root / f"{name}.availability.csv"
+        availability.write_text(
+            "artwork_id,image_url,available,reason\n"
+            f"{rows[0]['artwork_id']},{rows[0]['image_url']},true,\n",
+            encoding="utf-8",
+        )
         corpus = root / f"{name}-corpus"
         build_corpus(
             source,
@@ -110,7 +116,7 @@ class EmbeddingBundleMergeTests(unittest.TestCase):
             corpus_version=f"{name}-corpus-v1",
             source_revision=f"{name}-revision",
             date_config=date_config,
-            source_payloads=(source, audit),
+            source_payloads=(source, audit, availability),
             counting_unit=counting_unit,
         )
         bundle = root / f"{name}-bundle"
@@ -296,6 +302,12 @@ class EmbeddingBundleMergeTests(unittest.TestCase):
             provenance = manifest["files"]["sourceProvenance"]
             self.assertTrue(any(path.endswith("met-audit.json") for path in provenance))
             self.assertTrue(any(path.endswith("nga-audit.json") for path in provenance))
+            self.assertTrue(
+                any(path.endswith("met.availability.csv") for path in provenance)
+            )
+            self.assertTrue(
+                any(path.endswith("nga.availability.csv") for path in provenance)
+            )
             for entry in manifest["artifacts"]:
                 path = output / entry["path"]
                 self.assertEqual(path.stat().st_size, entry["bytes"])
@@ -431,6 +443,29 @@ class EmbeddingBundleMergeTests(unittest.TestCase):
             self.assertEqual(settings["image_input_policy"], "per-record-mixed")
             self.assertEqual(
                 settings["image_input_policies"], [nga_policy, met_policy]
+            )
+
+    def test_operational_request_delays_do_not_change_the_processor_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            met, nga = self._fixtures(root)
+            for bundle, delay in ((met, 0), (nga, 1.0)):
+                model_path = bundle / "model-manifest.json"
+                manifest = json.loads(model_path.read_text(encoding="utf-8"))
+                manifest["model"]["settings"]["request_delay_seconds"] = delay
+                self._write_manifest(model_path, manifest)
+
+            merged = merge_embedding_bundles(
+                (met, nga), root / "combined", corpus_version="delay-merge-v1"
+            )
+
+            sources = merged["merge"]["sources"]
+            self.assertNotEqual(
+                sources[0]["model_settings_sha256"],
+                sources[1]["model_settings_sha256"],
+            )
+            self.assertNotIn(
+                "request_delay_seconds", merged["merge"]["processor_contract"]["settings"]
             )
 
     def test_rejects_bundle_without_content_hash_reconciliation(self) -> None:

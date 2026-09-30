@@ -7,7 +7,12 @@ import json
 from pathlib import Path
 import sys
 
+from .aic_visual import (
+    DEFAULT_REQUEST_DELAY_SECONDS as AIC_DEFAULT_REQUEST_DELAY_SECONDS,
+    prepare_aic_visual_subset,
+)
 from .build import CorpusBuildError, SUPPORTED_COUNTING_UNITS, build_corpus
+from .cma_visual import prepare_cma_visual_subset
 from .dates import DateConfig
 from .embedded_corpus import derive_embedded_corpus
 from .embeddings import DeterministicTestEncoder, Siglip2LocalEncoder, build_embedding_index
@@ -20,6 +25,7 @@ from .nga_visual import (
     prepare_nga_visual_subset,
 )
 from .repack import repack_embedded_bundle
+from .smk_visual import prepare_smk_visual_subset
 from .export_concepts import add_arguments as add_export_concept_arguments
 
 
@@ -117,6 +123,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     embed.add_argument("--image-fetch-retries", type=int, default=2)
     embed.add_argument("--image-request-timeout", type=float, default=30)
+    embed.add_argument(
+        "--image-request-delay-seconds",
+        type=float,
+        default=0,
+        help="minimum delay between remote request starts across download workers",
+    )
     embed.add_argument("--max-image-pixels", type=int, default=100_000_000)
     embed.add_argument(
         "--image-host",
@@ -219,6 +231,113 @@ def _parser() -> argparse.ArgumentParser:
             "include image-eligible objects without trustworthy timeline bounds; "
             "excluded by default because NGA numeric dates can be artist lifespans"
         ),
+    )
+
+    prepare_cma = subparsers.add_parser(
+        "prepare-cma-visual",
+        help="prepare a deterministic CC0 Cleveland Museum of Art image subset",
+    )
+    prepare_cma.add_argument(
+        "--snapshot-json",
+        type=Path,
+        required=True,
+        help="official CMA openaccess data.json or saved API response",
+    )
+    prepare_cma.add_argument("--output-csv", type=Path, required=True)
+    prepare_cma.add_argument(
+        "--source-revision",
+        required=True,
+        help=(
+            "pinned 40-character Git commit for data.json, or exact SHA-256 "
+            "for a saved API response"
+        ),
+    )
+    prepare_cma.add_argument(
+        "--sample-size",
+        type=int,
+        default=0,
+        help="deterministic sample size; 0 prepares every eligible artwork",
+    )
+    prepare_cma.add_argument("--seed", default="cma-cc0-web-visual-v1")
+    prepare_cma.add_argument("--workers", type=int, default=16)
+    prepare_cma.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help="skip the resumable header-only image availability check",
+    )
+    prepare_cma.add_argument(
+        "--include-undated",
+        action="store_true",
+        help="include rights-cleared images without trustworthy timeline bounds",
+    )
+
+    prepare_aic = subparsers.add_parser(
+        "prepare-aic-visual",
+        help="prepare a deterministic public-domain AIC image subset",
+    )
+    prepare_aic.add_argument(
+        "--source-dump",
+        type=Path,
+        required=True,
+        help="official extracted AIC API dump or original .tar.bz2 archive",
+    )
+    prepare_aic.add_argument("--output-csv", type=Path, required=True)
+    prepare_aic.add_argument(
+        "--source-revision",
+        required=True,
+        help="SHA-256 of the archive or deterministic extracted-dump inventory",
+    )
+    prepare_aic.add_argument(
+        "--sample-size",
+        type=int,
+        default=0,
+        help="deterministic sample size; 0 prepares every eligible artwork",
+    )
+    prepare_aic.add_argument(
+        "--seed", default="aic-public-domain-preferred-visual-v1"
+    )
+    prepare_aic.add_argument(
+        "--request-delay-seconds",
+        type=float,
+        default=AIC_DEFAULT_REQUEST_DELAY_SECONDS,
+        help="delay between live AIC image checks; official guidance recommends 1 second",
+    )
+    prepare_aic.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help="skip the sequential resumable image availability check",
+    )
+
+    prepare_smk = subparsers.add_parser(
+        "prepare-smk-visual",
+        help="prepare a deterministic public-domain SMK image subset",
+    )
+    prepare_smk.add_argument(
+        "--snapshot",
+        type=Path,
+        required=True,
+        help="official SMK nightly JSON/ZIP or saved API response",
+    )
+    prepare_smk.add_argument("--output-csv", type=Path, required=True)
+    prepare_smk.add_argument(
+        "--source-revision",
+        required=True,
+        help="exact lowercase SHA-256 of the local SMK snapshot",
+    )
+    prepare_smk.add_argument(
+        "--sample-size",
+        type=int,
+        default=0,
+        help="deterministic sample size; 0 prepares every eligible artwork",
+    )
+    prepare_smk.add_argument(
+        "--seed", default="smk-public-domain-thumbnail-visual-v1"
+    )
+    prepare_smk.add_argument("--workers", type=int, default=16)
+    prepare_smk.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help="skip the resumable header-only image availability check",
     )
 
     derive = subparsers.add_parser(
@@ -327,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
                     device=args.device,
                     download_workers=args.download_workers,
                     request_timeout=args.image_request_timeout,
+                    request_delay_seconds=args.image_request_delay_seconds,
                     fetch_retries=args.image_fetch_retries,
                     max_image_pixels=args.max_image_pixels,
                     allowed_image_hosts=args.image_hosts or ("images.metmuseum.org",),
@@ -383,6 +503,59 @@ def main(argv: list[str] | None = None) -> int:
                 min_short_side=args.min_short_side,
                 preflight=not args.no_preflight,
                 include_undated=args.include_undated,
+                progress=lambda examined, prepared, total: print(
+                    f"examined={examined} prepared={prepared}/"
+                    f"{args.sample_size or total} "
+                    f"eligible={total}",
+                    file=sys.stderr,
+                    flush=True,
+                ),
+            )
+        elif args.command == "prepare-cma-visual":
+            manifest = prepare_cma_visual_subset(
+                args.snapshot_json,
+                args.output_csv,
+                source_revision=args.source_revision,
+                sample_size=args.sample_size,
+                seed=args.seed,
+                workers=args.workers,
+                preflight=not args.no_preflight,
+                include_undated=args.include_undated,
+                progress=lambda examined, prepared, total: print(
+                    f"examined={examined} prepared={prepared}/"
+                    f"{args.sample_size or total} "
+                    f"eligible={total}",
+                    file=sys.stderr,
+                    flush=True,
+                ),
+            )
+        elif args.command == "prepare-aic-visual":
+            manifest = prepare_aic_visual_subset(
+                args.source_dump,
+                args.output_csv,
+                source_revision=args.source_revision,
+                sample_size=args.sample_size,
+                seed=args.seed,
+                workers=1,
+                preflight=not args.no_preflight,
+                request_delay_seconds=args.request_delay_seconds,
+                progress=lambda examined, prepared, total: print(
+                    f"examined={examined} prepared={prepared}/"
+                    f"{args.sample_size or total} "
+                    f"eligible={total}",
+                    file=sys.stderr,
+                    flush=True,
+                ),
+            )
+        elif args.command == "prepare-smk-visual":
+            manifest = prepare_smk_visual_subset(
+                args.snapshot,
+                args.output_csv,
+                source_revision=args.source_revision,
+                sample_size=args.sample_size,
+                seed=args.seed,
+                workers=args.workers,
+                preflight=not args.no_preflight,
                 progress=lambda examined, prepared, total: print(
                     f"examined={examined} prepared={prepared}/"
                     f"{args.sample_size or total} "

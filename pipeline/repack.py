@@ -11,7 +11,11 @@ from typing import Mapping, Sequence
 
 from . import __version__
 from .build import BUILD_SCHEMA_VERSION, CorpusBuildError, sha256_file
-from .embeddings import EMBED_SCHEMA_VERSION
+from .embeddings import (
+    EMBED_SCHEMA_VERSION,
+    _source_provenance_payloads,
+    _validate_source_provenance_payload,
+)
 
 
 REPACK_SCHEMA_VERSION = "mnemosyne-embedding-repack/v1"
@@ -364,17 +368,14 @@ def repack_embedded_bundle(
     if not isinstance(corpus_identity, dict) or not isinstance(bins, list):
         raise CorpusBuildError("rebuilt corpus manifest lacks corpus identity or bins")
 
-    provenance_sources = sorted((corpus_root / "source-payloads").glob("*.json"))
+    provenance_sources = _source_provenance_payloads(corpus_root / "source-payloads")
     for path in provenance_sources:
         relative = path.relative_to(corpus_root).as_posix()
         if relative not in corpus_artifacts:
             raise CorpusBuildError(
-                f"JSON source provenance is not covered by artifact checksums: {relative}"
+                f"source provenance is not covered by artifact checksums: {relative}"
             )
-        try:
-            json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            raise CorpusBuildError(f"JSON source provenance is invalid: {path}") from exc
+        _validate_source_provenance_payload(path)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(

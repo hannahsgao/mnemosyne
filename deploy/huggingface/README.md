@@ -13,7 +13,8 @@ pinned: false
 This is the private, CPU-only Hugging Face Space profile for Mnemosyne's
 arbitrary visual search. It runs the exact SigLIP 2 text tower used by the
 offline image build, then performs exact inner-product retrieval against the
-immutable merged Met and National Gallery of Art artifact bundle. The Space exposes the existing `/v1/search`,
+immutable merged Met, National Gallery of Art, and Cleveland Museum of Art
+artifact bundle. The Space exposes the existing `/v1/search`,
 `/v1/evidence`, `/healthz`, `/livez`, and `/readyz` HTTP contracts on port
 7860.
 
@@ -31,19 +32,19 @@ facts are:
 
 | Property | Pinned value |
 | --- | --- |
-| Local bundle | `.local-data/nga-artifacts/met-nga-openaccess-199474-siglip2-prod-v1` |
-| Corpus ID/version | `met-nga-openaccess-199474-siglip2-v1` |
-| Corpus label | `The Met and National Gallery of Art open-access image catalog` |
-| Rows/counting unit | 199,474 catalog records |
-| Composition | 142,482 Met records + 56,992 NGA records |
+| Local bundle | `.local-data/museum-run-20260905/artifacts/met-nga-cma-openaccess-240278-siglip2-prod-candidate-v1` |
+| Corpus ID/version | `met-nga-cma-openaccess-240278-siglip2-v1` |
+| Corpus label | `The Met, National Gallery of Art, and Cleveland Museum of Art open-access image catalog` |
+| Rows/counting unit | 240,278 catalog records |
+| Composition | 142,482 Met records + 56,992 NGA records + 40,804 CMA records |
 | Timeline bins | 1,703 |
-| Matrix | `(199474, 768)`, `float32`, L2-normalized |
+| Matrix | `(240278, 768)`, `float32`, L2-normalized |
 | Exact index | NumPy flat inner product; no FAISS copy |
 | Model | `google/siglip2-base-patch16-224` |
 | Model revision | `75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2` |
-| Manifest payloads | 17 files, 876,745,678 declared bytes |
-| Whole bundle | 18 files including the manifest, 876,988,257 bytes (about 836.4 MiB) |
-| Embedding file SHA-256 | `b3b56c14de8e767de2ee1b88db5fe71e0a84d8e9208cfebf31190d1ab599fa56` |
+| Manifest payloads | 24 files, 1,058,463,715 declared bytes |
+| Whole bundle | 25 files including the manifest, 1,058,710,026 bytes (about 1,009.7 MiB) |
+| Embedding file SHA-256 | `69256d8701f034db46942521a1f01067f77daac90f9083bd45dadbd33fc8f0a7` |
 
 The Docker build downloads only the required model files at that exact
 revision into `/home/user/.cache/huggingface`, then transfers ownership to the
@@ -61,10 +62,12 @@ The Docker image uses Python 3.11, the CPU-only PyTorch 2.12.0 wheel, UID 1000,
 and one API process bound to `0.0.0.0:7860`. BLAS/OpenMP libraries are limited
 to two threads. The read-only bucket is mounted at `/artifacts`; startup copies
 only manifest-declared files from the versioned
-`releases/met-nga-openaccess-199474-siglip2-v1` prefix into
+`releases/met-nga-cma-openaccess-240278-siglip2-v1` prefix into
 `/tmp/mnemosyne-artifacts` and exposes the completed copy with one atomic
-rename. The application then verifies every manifest byte count and checksum
-while loading it.
+rename. Hydration computes each manifest checksum while copying and writes a
+manifest-bound verification stamp. The application validates that stamp and
+the copied file metadata before skipping the otherwise redundant second
+checksum pass and full embedding-normalization scan.
 
 The HTTP admission cap is eight in-flight search/evidence requests. That cap
 is an overload boundary, not eight-way model computation: the service's global
@@ -105,8 +108,8 @@ Set non-secret deployment identifiers explicitly:
 export MNEMOSYNE_HF_NAMESPACE="your-hugging-face-user-or-org"
 export MNEMOSYNE_HF_BUCKET_ID="$MNEMOSYNE_HF_NAMESPACE/mnemosyne-artifacts"
 export MNEMOSYNE_HF_SPACE_ID="$MNEMOSYNE_HF_NAMESPACE/mnemosyne-visual-search"
-export MNEMOSYNE_HF_RELEASE_PREFIX="releases/met-nga-openaccess-199474-siglip2-v1"
-export MNEMOSYNE_ARTIFACT_BUNDLE="$PWD/.local-data/nga-artifacts/met-nga-openaccess-199474-siglip2-prod-v1"
+export MNEMOSYNE_HF_RELEASE_PREFIX="releases/met-nga-cma-openaccess-240278-siglip2-v1"
+export MNEMOSYNE_ARTIFACT_BUNDLE="$PWD/.local-data/museum-run-20260905/artifacts/met-nga-cma-openaccess-240278-siglip2-prod-candidate-v1"
 ```
 
 Before continuing, confirm that `MNEMOSYNE_ARTIFACT_BUNDLE` contains the
@@ -125,7 +128,7 @@ hf buckets sync \
   --dry-run
 ```
 
-Review every JSONL action from the dry run. It should plan the 18 bundle files,
+Review every JSONL action from the dry run. It should plan the 25 bundle files,
 including `model-manifest.json`, and no unrelated local data. Only after that
 review, run the same sync without the dry-run flag:
 
@@ -253,7 +256,7 @@ health = request_json("/healthz")
 assert health["status"] == "ok", health
 assert health["mode"] == "embedding", health
 assert health["modelVersion"] == "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2", health
-assert health["corpusVersion"] == "met-nga-openaccess-199474-siglip2-v1", health
+assert health["corpusVersion"] == "met-nga-cma-openaccess-240278-siglip2-v1", health
 
 result = request_json(
     "/v1/search",
@@ -262,10 +265,10 @@ result = request_json(
 assert result["schemaVersion"] == "mnemosyne.search.v1", result
 assert len(result["queries"]) == 2, result["queries"]
 assert result["corpus"] == {
-    "id": "met-nga-openaccess-199474-siglip2-v1",
-    "version": "met-nga-openaccess-199474-siglip2-v1",
-    "label": "The Met and National Gallery of Art open-access image catalog",
-    "count": 199474,
+    "id": "met-nga-cma-openaccess-240278-siglip2-v1",
+    "version": "met-nga-cma-openaccess-240278-siglip2-v1",
+    "label": "The Met, National Gallery of Art, and Cleveland Museum of Art open-access image catalog",
+    "count": 240278,
     "countingUnit": "catalog-record",
     "view": "all",
     "filters": {},

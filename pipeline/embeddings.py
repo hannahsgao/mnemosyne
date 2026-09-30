@@ -8,10 +8,12 @@ import hashlib
 from io import BytesIO
 from importlib.metadata import PackageNotFoundError, version as package_version
 import json
+import math
 from pathlib import Path
 import shutil
 import ssl
 import tempfile
+import threading
 import time
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError
@@ -19,6 +21,10 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from . import __version__
+from .aic_visual import (
+    AIC_IMAGE_INPUT_POLICY,
+    DEFAULT_REQUEST_DELAY_SECONDS as AIC_MIN_REQUEST_DELAY_SECONDS,
+)
 from .build import CorpusBuildError, sha256_file
 
 
@@ -26,6 +32,54 @@ EMBED_SCHEMA_VERSION = "mnemosyne-embedding-build/v1"
 SIGLIP_IMAGE_INPUT_POLICY = "remote-original-met-web-large-min-side-224/v2"
 DECLARED_REMOTE_IMAGE_INPUT_POLICY = "declared-remote-url/v1"
 DEFAULT_ALLOWED_IMAGE_HOSTS = ("images.metmuseum.org",)
+KNOWN_PERMISSION_STATUSES = frozenset(
+    {"public-domain", "explicitly-permitted", "unreviewed"}
+)
+PERMITTED_PERMISSION_STATUSES = frozenset(
+    {"public-domain", "explicitly-permitted"}
+)
+
+
+def _source_provenance_payloads(directory: Path) -> list[Path]:
+    """Return compact audit payloads that must survive into model bundles."""
+
+    if not directory.is_dir():
+        return []
+    return sorted(
+        (
+            path
+            for path in directory.iterdir()
+            if path.is_file()
+            and (
+                path.suffix.casefold() == ".json"
+                or path.name.casefold().endswith(".availability.csv")
+            )
+        ),
+        key=lambda path: path.name,
+    )
+
+
+def _validate_source_provenance_payload(path: Path) -> None:
+    if path.suffix.casefold() == ".json":
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise CorpusBuildError(f"source provenance is invalid JSON: {path}") from exc
+        if not isinstance(payload, (dict, list)):
+            raise CorpusBuildError(f"source provenance JSON has an invalid root: {path}")
+        return
+    if path.name.casefold().endswith(".availability.csv"):
+        try:
+            with path.open(encoding="utf-8-sig", newline="") as handle:
+                fields = csv.DictReader(handle).fieldnames
+        except (OSError, UnicodeError) as exc:
+            raise CorpusBuildError(f"source availability provenance is invalid: {path}") from exc
+        if not fields or len(fields) != len(set(fields)):
+            raise CorpusBuildError(
+                f"source availability provenance has an invalid CSV header: {path}"
+            )
+        return
+    raise CorpusBuildError(f"source provenance has an unsupported file type: {path}")
 
 
 class _ValidatedRedirectHandler(HTTPRedirectHandler):
@@ -120,6 +174,7 @@ class Siglip2LocalEncoder:
         device: str = "auto",
         download_workers: int = 8,
         request_timeout: float = 30,
+        request_delay_seconds: float = 0,
         fetch_retries: int = 2,
         max_image_bytes: int = 64 * 1024 * 1024,
         max_image_pixels: int = 100_000_000,
@@ -129,6 +184,30 @@ class Siglip2LocalEncoder:
     ) -> None:
         if not revision or revision == "main":
             raise CorpusBuildError("SigLIP 2 builds require a pinned --model-revision, not 'main'")
+        if (
+            download_workers < 1
+            or not math.isfinite(request_timeout)
+            or request_timeout <= 0
+            or not math.isfinite(request_delay_seconds)
+            or request_delay_seconds < 0
+            or fetch_retries < 0
+        ):
+            raise CorpusBuildError(
+                "stream workers/timeout must be positive and delay/retries non-negative"
+            )
+        if max_image_bytes < 1024 or max_image_pixels < 1:
+            raise CorpusBuildError("image byte and pixel limits must be positive")
+        normalized_hosts = tuple(
+            sorted(
+                {
+                    host.strip().lower().rstrip(".")
+                    for host in allowed_image_hosts
+                    if host.strip()
+                }
+            )
+        )
+        if not normalized_hosts:
+            raise CorpusBuildError("at least one allowed image host is required")
         try:
             import torch
             from transformers import AutoModel, AutoProcessor
@@ -162,20 +241,12 @@ class Siglip2LocalEncoder:
             raise CorpusBuildError("CUDA was requested but is unavailable")
         if device == "mps" and not torch.backends.mps.is_available():
             raise CorpusBuildError("MPS was requested but is unavailable")
-        if download_workers < 1 or request_timeout <= 0 or fetch_retries < 0:
-            raise CorpusBuildError(
-                "stream workers/timeout must be positive and retries non-negative"
-            )
-        if max_image_bytes < 1024 or max_image_pixels < 1:
-            raise CorpusBuildError("image byte and pixel limits must be positive")
-        normalized_hosts = tuple(
-            sorted({host.strip().lower().rstrip(".") for host in allowed_image_hosts if host.strip()})
-        )
-        if not normalized_hosts:
-            raise CorpusBuildError("at least one allowed image host is required")
         self._device = device
         self._download_workers = download_workers
         self._request_timeout = request_timeout
+        self._request_delay_seconds = request_delay_seconds
+        self._request_rate_lock = threading.Lock()
+        self._next_request_at = 0.0
         self._fetch_retries = fetch_retries
         self._max_image_bytes = max_image_bytes
         self._max_image_pixels = max_image_pixels
@@ -245,20 +316,27 @@ class Siglip2LocalEncoder:
             return SIGLIP_IMAGE_INPUT_POLICY
         return DECLARED_REMOTE_IMAGE_INPUT_POLICY
 
+    @staticmethod
+    def _remote_request_headers(url: str) -> dict[str, str]:
+        headers = {
+            "Accept": "image/avif,image/webp,image/jpeg,image/png,image/*;q=0.8",
+            "User-Agent": "Mnemosyne embedding corpus builder",
+        }
+        if (urlsplit(url).hostname or "").casefold().rstrip(".") == "www.artic.edu":
+            headers["AIC-User-Agent"] = "Mnemosyne embedding corpus builder"
+        return headers
+
     def _download(
         self, raw_url: str, *, prefer_web_large: bool = True
     ) -> tuple[bytes, str]:
         url = self._resolved_image_url(raw_url, prefer_web_large=prefer_web_large)
         request = Request(
             url,
-            headers={
-                "Accept": "image/avif,image/webp,image/jpeg,image/png,image/*;q=0.8",
-                "User-Agent": "Mnemosyne embedding corpus builder",
-            },
+            headers=self._remote_request_headers(url),
         )
         for attempt in range(self._fetch_retries + 1):
             try:
-                with self._url_opener.open(request, timeout=self._request_timeout) as response:
+                with self._open_remote_request(request) as response:
                     self._validate_remote_url(response.geturl())
                     resolved_url = response.geturl()
                     declared = response.headers.get("Content-Length")
@@ -284,6 +362,38 @@ class Siglip2LocalEncoder:
                     raise CorpusBuildError(f"image fetch failed: {url}: {exc}") from exc
             time.sleep(0.25 * (2**attempt))
         raise AssertionError("unreachable image retry state")
+
+    def _open_remote_request(self, request: Request):
+        """Open a request while strictly pacing starts across downloader threads."""
+        if self._request_delay_seconds <= 0:
+            return self._url_opener.open(request, timeout=self._request_timeout)
+        with self._request_rate_lock:
+            now = time.monotonic()
+            scheduled_at = max(now, self._next_request_at)
+            self._next_request_at = scheduled_at + self._request_delay_seconds
+            wait_seconds = scheduled_at - now
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+            # Keep the start lock through ``open`` so a descheduled thread
+            # cannot be overtaken by another downloader after reserving a slot.
+            return self._url_opener.open(request, timeout=self._request_timeout)
+
+    def _validate_source_request_policy(
+        self, records: Sequence[Mapping[str, str]]
+    ) -> None:
+        input_policies = {
+            record.get("image_input_policy", "").strip() for record in records
+        }
+        if AIC_IMAGE_INPUT_POLICY not in input_policies:
+            return
+        if self._download_workers != 1:
+            raise CorpusBuildError(
+                "AIC image embedding requires --download-workers 1"
+            )
+        if self._request_delay_seconds < AIC_MIN_REQUEST_DELAY_SECONDS:
+            raise CorpusBuildError(
+                "AIC image embedding requires --image-request-delay-seconds 1 or greater"
+            )
 
     def _decode_image(self, payload: bytes, input_source: str, artwork_id: str):
         try:
@@ -382,6 +492,8 @@ class Siglip2LocalEncoder:
         except ImportError as exc:
             raise CorpusBuildError("SigLIP 2 encoding requires NumPy and Pillow") from exc
 
+        self._validate_source_request_policy(records)
+
         fingerprint = hashlib.sha256()
         fingerprint.update(
             json.dumps(
@@ -391,6 +503,10 @@ class Siglip2LocalEncoder:
                     "dimension": self.dimension,
                     "device": str(self._device),
                     "batch_size": batch_size,
+                    "download_workers": self._download_workers,
+                    "request_timeout_seconds": self._request_timeout,
+                    "request_delay_seconds": self._request_delay_seconds,
+                    "fetch_retries": self._fetch_retries,
                     "image_input_policy": SIGLIP_IMAGE_INPUT_POLICY,
                     "allowed_image_hosts": list(self._allowed_image_hosts),
                     "max_image_bytes": self._max_image_bytes,
@@ -671,6 +787,7 @@ class Siglip2LocalEncoder:
             "image_input_policy": SIGLIP_IMAGE_INPUT_POLICY,
             "download_workers": self._download_workers,
             "request_timeout_seconds": self._request_timeout,
+            "request_delay_seconds": self._request_delay_seconds,
             "fetch_retries": self._fetch_retries,
             "max_image_bytes": self._max_image_bytes,
             "max_image_pixels": self._max_image_pixels,
@@ -730,11 +847,26 @@ def _ordered_embedding_records(
         image = image_by_id.get(artwork_id)
         if image is None:
             raise CorpusBuildError(f"no image manifest row for {artwork_id}")
+        canonical_rights = canonical.get("image_rights_uri", "").strip()
+        image_rights = image.get("image_rights_uri", "").strip()
+        if canonical_rights != image_rights:
+            raise CorpusBuildError(
+                f"{artwork_id}: image rights differ between corpus and image manifest"
+            )
         if not image.get("image_url") and not image.get("image_path"):
             raise CorpusBuildError(f"{artwork_id}: no image URL or path")
-        if image.get("permission_status") == "unreviewed" and not allow_unreviewed:
+        permission_status = image.get("permission_status", "").strip()
+        if permission_status not in KNOWN_PERMISSION_STATUSES:
             raise CorpusBuildError(
-                f"{artwork_id}: image rights are unreviewed; pass --allow-unreviewed-images "
+                f"{artwork_id}: image permission status is missing or invalid"
+            )
+        rights_are_reviewed = (
+            permission_status in PERMITTED_PERMISSION_STATUSES and bool(image_rights)
+        )
+        if not rights_are_reviewed and not allow_unreviewed:
+            raise CorpusBuildError(
+                f"{artwork_id}: image rights are unreviewed or missing; "
+                "pass --allow-unreviewed-images "
                 "only after an external rights review"
             )
         records.append({**canonical, **image})
@@ -966,15 +1098,32 @@ def build_embedding_index(
 
         source_provenance_paths: list[Path] = []
         source_payload_dir = corpus_root / "source-payloads"
-        if source_payload_dir.is_dir():
-            provenance_sources = sorted(source_payload_dir.glob("*.json"))
-            if provenance_sources:
-                provenance_dir = staging / "source-provenance"
-                provenance_dir.mkdir()
-                for source_path in provenance_sources:
-                    target_path = provenance_dir / source_path.name
-                    shutil.copyfile(source_path, target_path)
-                    source_provenance_paths.append(target_path)
+        provenance_sources = _source_provenance_payloads(source_payload_dir)
+        if provenance_sources:
+            declared_artifacts = {
+                str(entry.get("path") or ""): entry
+                for entry in corpus_manifest.get("artifacts", [])
+                if isinstance(entry, dict)
+            }
+            provenance_dir = staging / "source-provenance"
+            provenance_dir.mkdir()
+            for source_path in provenance_sources:
+                relative = source_path.relative_to(corpus_root).as_posix()
+                entry = declared_artifacts.get(relative)
+                if (
+                    not isinstance(entry, dict)
+                    or entry.get("bytes") != source_path.stat().st_size
+                    or str(entry.get("sha256") or "").casefold()
+                    != sha256_file(source_path)
+                ):
+                    raise CorpusBuildError(
+                        "source provenance is not covered by a valid corpus artifact "
+                        f"checksum: {relative}"
+                    )
+                _validate_source_provenance_payload(source_path)
+                target_path = provenance_dir / source_path.name
+                shutil.copyfile(source_path, target_path)
+                source_provenance_paths.append(target_path)
 
         embedded_images_path = staging / "embedded-images.manifest.csv"
         _write_csv(embedded_images_path, embedded_image_rows)

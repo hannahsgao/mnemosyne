@@ -1,8 +1,9 @@
 # Offline corpus pipeline
 
-This package builds deterministic corpus artifacts from either a local, pinned
-ArtiFact clean-split CSV or the Met's official Open Access export. It never
-crawls museum pages.
+This package builds deterministic corpus artifacts from local, pinned official
+museum datasets and the ArtiFact clean-split proof CSV. It never crawls museum
+collection HTML: metadata comes from official bulk files or saved API
+responses, and only rights-cleared image URLs are fetched for embedding.
 
 ## Build the Met corpus
 
@@ -79,7 +80,11 @@ build-manifest.json
 ```
 
 Use `--require-parquet` in release jobs so a missing PyArrow dependency fails
-the build rather than producing only the portable proof outputs.
+the build rather than producing only the portable proof outputs. Parquet
+schemas are explicit: nullable creation years and offsets are `int64`, boolean
+rights/availability fields are boolean, and blank numeric values are null. This
+keeps schemas stable for mixed dated/undated inputs and zero-row denominator
+tables.
 
 ## Stream a rights-gated Met visual corpus
 
@@ -237,7 +242,122 @@ python3 -m pipeline repack-embedded-bundle \
 separately searchable pages and inseparable child records. Their official
 physical-object roots remain available for diagnostics and de-duplication.
 
-### Merge completed Met and NGA bundles
+## Add Cleveland, AIC, and SMK visual corpora
+
+Three additional adapters consume official machine-readable snapshots. Keep
+acquisition separate from normalization so every run has immutable input bytes,
+a source revision, a retrieval timestamp, and an auditable adapter manifest.
+Start with a preflighted sample; change `--sample-size` to `0` only after that
+sample builds and embeds successfully.
+
+| Source | Official snapshot | Strict image gate | Embed host and pacing |
+| --- | --- | --- | --- |
+| Cleveland Museum of Art (CMA) | Git/LFS `data.json` at a pinned commit | exact `share_license_status=CC0`, blank copyright, valid web JPEG | `openaccess-cdn.clevelandart.org` |
+| Art Institute of Chicago (AIC) | downloaded API data dump pinned by SHA-256 | JSON `is_public_domain=true`, blank copyright notice, canonical preferred `image_id` | `www.artic.edu`, one request at a time, one-second delay |
+| SMK – National Gallery of Denmark | nightly JSON ZIP pinned by SHA-256 | JSON `public_domain=true`, exact Public Domain Mark URI, declared image | `iip-thumb.smk.dk` |
+
+Acquire and pin the CMA Git/LFS snapshot:
+
+```bash
+git clone https://github.com/ClevelandMuseumArt/openaccess.git /path/to/cma-openaccess
+git -C /path/to/cma-openaccess checkout PINNED_CMA_COMMIT
+git -C /path/to/cma-openaccess lfs pull
+git -C /path/to/cma-openaccess rev-parse HEAD
+
+python3 -m pipeline prepare-cma-visual \
+  --snapshot-json /path/to/cma-openaccess/data.json \
+  --output-csv /path/to/work/cma-visual-smoke.csv \
+  --source-revision PINNED_CMA_COMMIT \
+  --sample-size 1024 \
+  --workers 16
+```
+
+CMA preparation also applies the versioned
+`cma-timeline-date-sanity/v1` gate. It quarantines, rather than clips or
+silently repairs, bounds outside -15,000 through 2026, intervals wider than
+10,000 years, contradictory BCE/CE signs, literal invalid dates, and
+disjunctive ancient/modern dates. Per-rule counts and sample artwork IDs are
+recorded in the adapter manifest; the raw museum rows remain in the pinned
+snapshot. With the default strict dated policy, quarantined rows are excluded.
+
+For AIC, use the official bulk dump rather than paginating the collection API.
+The adapter accepts the original archive or an extracted dump. An archive is
+pinned by the SHA-256 of its bytes; an extracted directory is pinned by the
+deterministic inventory returned by `compute_aic_snapshot_revision`. Verify the
+dump's upstream freshness before starting a production-scale run.
+
+```bash
+curl --fail --location \
+  https://artic-api-data.s3.amazonaws.com/artic-api-data.tar.bz2 \
+  --output /path/to/snapshots/artic-api-data.tar.bz2
+shasum -a 256 /path/to/snapshots/artic-api-data.tar.bz2
+
+python3 -m pipeline prepare-aic-visual \
+  --source-dump /path/to/snapshots/artic-api-data.tar.bz2 \
+  --output-csv /path/to/work/aic-visual-smoke.csv \
+  --source-revision COPY_THE_SHA256_PRINTED_ABOVE \
+  --sample-size 1024 \
+  --request-delay-seconds 1
+```
+
+The SMK bulk ZIP is updated in place, so copy it into immutable snapshot
+storage and identify that copy by its SHA-256 and retrieval timestamp:
+
+```bash
+curl --fail --location \
+  https://getallzip.open.smk.dk/smk_all_da.zip \
+  --output /path/to/snapshots/smk_all_da.zip
+shasum -a 256 /path/to/snapshots/smk_all_da.zip
+
+python3 -m pipeline prepare-smk-visual \
+  --snapshot /path/to/snapshots/smk_all_da.zip \
+  --output-csv /path/to/work/smk-visual-smoke.csv \
+  --source-revision COPY_THE_SHA256_PRINTED_ABOVE \
+  --sample-size 1024 \
+  --workers 16
+```
+
+Each command writes the canonical CSV, a checksummed `*.manifest.json`, and a
+resumable URL-bound `*.availability.csv`. Do not use `--no-preflight` for a
+release. Feed each CSV through `pipeline build`, then the same
+embed/derive/rebuild/repack sequence shown for NGA. The generic build command
+retains ArtiFact provenance defaults for compatibility, so an official-museum
+build must explicitly set `--source-url`, `--source-kind`, `--retrieved-at`, and
+the adapter manifest as a repeatable `--source-payload`:
+
+| Source | Initial `--source-kind` | `--source-url` | Source metadata declaration |
+| --- | --- | --- | --- |
+| CMA Git/LFS | `cma-open-access-data-json` | `https://github.com/ClevelandMuseumArt/openaccess` | `--metadata-license https://creativecommons.org/publicdomain/zero/1.0/` |
+| AIC archive | `aic-api-data-local-tar-bz2` | `https://artic-api-data.s3.amazonaws.com/artic-api-data.tar.bz2` | `--metadata-license https://creativecommons.org/publicdomain/zero/1.0/` for the fields retained by this adapter |
+| SMK snapshot | `smk-open-local-json-snapshot` | `https://getallzip.open.smk.dk/smk_all_da.zip` | omit `--metadata-license`; the consumed snapshot does not declare an exact metadata-license URI |
+
+SMK's exact Public Domain Mark is retained as `image_rights_uri`; it is a
+rights/status assertion for the work and image, not mislabeled as a metadata
+license. Keep the same date-rule and model contracts across bundles.
+
+For the embedding pass, add the source's host from the table. AIC's image
+guidance applies to the actual pixel downloads as well as preflight, so use:
+
+```bash
+python3 -m pipeline embed \
+  --corpus-dir /path/to/artifacts/aic-visual-bootstrap-corpus \
+  --output /path/to/artifacts/aic-visual-bootstrap-siglip2 \
+  --model-revision PINNED_HUGGING_FACE_COMMIT \
+  --dtype float32 \
+  --batch-size 16 \
+  --download-workers 1 \
+  --image-request-delay-seconds 1 \
+  --image-host www.artic.edu \
+  --no-build-faiss
+```
+
+For CMA and SMK, omit the delay and substitute their respective `--image-host`.
+The adapters deliberately keep rights gates source-specific; a generic truthy
+`public_domain` field is not sufficient. The encoder recognizes AIC's declared
+input policy and rejects unsafe worker or delay settings rather than relying on
+operator discipline.
+
+## Merge completed museum bundles
 
 The merge operation does not re-embed the Met. It accepts only completed,
 content-hash-reconciled bundles with the same model ID, pinned revision,
@@ -326,8 +446,10 @@ bundle.
 
 Remote inputs must use HTTPS and an explicit host allowlist. Met's image host is
 allowed by default; repeat `--image-host` to support another trusted image
-source. `--image-root` resolves relative local `image_path` entries, so the
-encoder remains usable with either streamed URLs or an authorized local corpus.
+source. `--image-request-delay-seconds` enforces a minimum interval between
+request starts across all downloader threads for sources that require pacing.
+`--image-root` resolves relative local `image_path` entries, so the encoder
+remains usable with either streamed URLs or an authorized local corpus.
 
 The default hidden checkpoint directory is updated after every successful
 batch. Re-running the same command resumes from the last committed offset and
@@ -371,10 +493,11 @@ python3 -m pipeline embed \
   --encoder deterministic
 ```
 
-Rights are never inferred from image availability. Images lacking a positive
-public-domain flag or `image_use_permitted=true` are marked `unreviewed` in the
-image manifest and must not enter an embedding/display job without a separate
-rights gate.
+Rights are never inferred from image availability. A permitted status requires
+both a positive public-domain or explicit-permission signal and a non-empty,
+source-reviewed `image_rights_uri`. Everything else is marked `unreviewed` in
+the image manifest and must not enter an embedding/display job without a
+separate rights review.
 
 ## Derive and reconcile the production content-hash corpus
 
@@ -430,8 +553,9 @@ python3 -m pipeline embed \
 
 `pipeline build` retains the input CSV plus each repeatable `--source-payload`
 under `source-payloads/` and checksums them in the corpus manifest. The embedding
-builder carries these JSON files into the final model bundle under
-`source-provenance/`, where they are covered by the model artifact checksums.
+builder carries JSON audit payloads and URL-bound `*.availability.csv` proofs
+into the final model bundle under `source-provenance/`; repacking and merging
+preserve them, and every carried file is covered by model artifact checksums.
 
 ### Reconcile the final streamed hashes without rerunning SigLIP 2
 

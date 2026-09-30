@@ -12,6 +12,8 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from .verification import validate_verified_hydration
+
 
 ARTIFACT_SCHEMA_VERSION = "mnemosyne.artifacts.v1"
 PIPELINE_ARTIFACT_SCHEMA_VERSION = "mnemosyne-embedding-build/v1"
@@ -315,7 +317,11 @@ class ArtifactBundle:
 
     @classmethod
     def load(
-        cls, root: str | Path, *, verify_checksums: bool = True
+        cls,
+        root: str | Path,
+        *,
+        verify_checksums: bool = True,
+        trust_hydration_verification: bool = False,
     ) -> "ArtifactBundle":
         base = Path(root)
         manifest_path = (
@@ -327,7 +333,16 @@ class ArtifactBundle:
         schema_version = manifest.get("artifactSchemaVersion", manifest.get("schema_version"))
         if schema_version not in {ARTIFACT_SCHEMA_VERSION, PIPELINE_ARTIFACT_SCHEMA_VERSION}:
             raise ValueError("unsupported or missing artifactSchemaVersion")
-        cls._verify_artifacts(base, manifest, verify_checksums=verify_checksums)
+        if trust_hydration_verification and not validate_verified_hydration(
+            base, manifest_path, manifest
+        ):
+            raise ValueError("trusted artifact hydration verification is missing or stale")
+        trusted_hydration = trust_hydration_verification
+        cls._verify_artifacts(
+            base,
+            manifest,
+            verify_checksums=verify_checksums and not trusted_hydration,
+        )
 
         files = manifest["files"]
         allowed_filter_fields = frozenset(
@@ -353,14 +368,15 @@ class ArtifactBundle:
         # Validate a bounded view at a time.  A single full-matrix norm call can
         # allocate another matrix-sized temporary when NumPy squares float32
         # values before reducing them.
-        norm_block_size = 8_192
-        for start in range(0, raw_embeddings.shape[0], norm_block_size):
-            block = raw_embeddings[start : start + norm_block_size]
-            raw_norms = np.linalg.norm(block, axis=1)
-            if np.any(raw_norms == 0) or not np.allclose(
-                raw_norms, 1.0, rtol=0, atol=5e-3
-            ):
-                raise ValueError("offline artwork embeddings must be L2-normalized")
+        if not trusted_hydration:
+            norm_block_size = 8_192
+            for start in range(0, raw_embeddings.shape[0], norm_block_size):
+                block = raw_embeddings[start : start + norm_block_size]
+                raw_norms = np.linalg.norm(block, axis=1)
+                if np.any(raw_norms == 0) or not np.allclose(
+                    raw_norms, 1.0, rtol=0, atol=5e-3
+                ):
+                    raise ValueError("offline artwork embeddings must be L2-normalized")
         # Keep the memory-mapped array intact. Offline builds are already
         # normalized and copying it here used to double resident memory.
         embeddings = raw_embeddings

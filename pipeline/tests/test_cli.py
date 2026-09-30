@@ -50,6 +50,20 @@ class PipelineCliTests(unittest.TestCase):
         )
         self.assertTrue(args.no_build_faiss)
 
+    def test_embed_accepts_a_source_request_delay(self) -> None:
+        args = _parser().parse_args(
+            [
+                "embed",
+                "--corpus-dir",
+                "corpus",
+                "--output",
+                "index",
+                "--image-request-delay-seconds",
+                "1",
+            ]
+        )
+        self.assertEqual(args.image_request_delay_seconds, 1.0)
+
     def test_prepare_nga_defaults_to_strict_dated_1024px_derivatives(self) -> None:
         args = _parser().parse_args(
             [
@@ -102,6 +116,97 @@ class PipelineCliTests(unittest.TestCase):
             prepare.call_args.kwargs["object_associations_csv"],
             Path("object_associations.csv"),
         )
+
+    def test_open_museum_visual_commands_preserve_source_specific_defaults(self) -> None:
+        cma = _parser().parse_args(
+            [
+                "prepare-cma-visual",
+                "--snapshot-json",
+                "data.json",
+                "--output-csv",
+                "cma.csv",
+                "--source-revision",
+                "a" * 40,
+            ]
+        )
+        self.assertEqual(cma.workers, 16)
+        self.assertFalse(cma.include_undated)
+
+        aic = _parser().parse_args(
+            [
+                "prepare-aic-visual",
+                "--source-dump",
+                "artic-api-data.tar.bz2",
+                "--output-csv",
+                "aic.csv",
+                "--source-revision",
+                "b" * 64,
+            ]
+        )
+        self.assertEqual(aic.request_delay_seconds, 1.0)
+        self.assertFalse(aic.no_preflight)
+
+        smk = _parser().parse_args(
+            [
+                "prepare-smk-visual",
+                "--snapshot",
+                "smk_all_da.zip",
+                "--output-csv",
+                "smk.csv",
+                "--source-revision",
+                "c" * 64,
+            ]
+        )
+        self.assertEqual(smk.workers, 16)
+        self.assertFalse(smk.no_preflight)
+
+    def test_open_museum_visual_commands_dispatch_the_pinned_snapshots(self) -> None:
+        cases = (
+            (
+                "prepare-cma-visual",
+                "pipeline.cli.prepare_cma_visual_subset",
+                ["--snapshot-json", "data.json"],
+                "snapshot_json",
+                Path("data.json"),
+                "a" * 40,
+            ),
+            (
+                "prepare-aic-visual",
+                "pipeline.cli.prepare_aic_visual_subset",
+                ["--source-dump", "aic.tar.bz2"],
+                "source_dump",
+                Path("aic.tar.bz2"),
+                "b" * 64,
+            ),
+            (
+                "prepare-smk-visual",
+                "pipeline.cli.prepare_smk_visual_subset",
+                ["--snapshot", "smk.zip"],
+                "snapshot",
+                Path("smk.zip"),
+                "c" * 64,
+            ),
+        )
+        for command, target, source_args, _label, expected, revision in cases:
+            with self.subTest(command=command), patch(
+                target, return_value={"schema_version": "fixture"}
+            ) as prepare, patch("builtins.print"):
+                result = main(
+                    [
+                        command,
+                        *source_args,
+                        "--output-csv",
+                        "output.csv",
+                        "--source-revision",
+                        revision,
+                        "--no-preflight",
+                    ]
+                )
+            self.assertEqual(result, 0)
+            self.assertEqual(prepare.call_args.args[0], expected)
+            self.assertEqual(
+                prepare.call_args.kwargs["source_revision"], revision
+            )
 
     def test_merge_accepts_repeatable_source_bundles(self) -> None:
         args = _parser().parse_args(
