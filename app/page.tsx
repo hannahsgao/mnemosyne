@@ -10,7 +10,34 @@ import {
   useRef,
   useState,
 } from "react";
-import { Timeline, type TimelineHoverPreview } from "../components/Timeline";
+import {
+  Timeline,
+  type TimelineHoverPreview,
+  type TimelineInputMethod,
+  type TimelineSeriesInteraction,
+} from "../components/Timeline";
+import {
+  createAnalyticsId,
+  trackPageAnalyticsOnce,
+  trackSearchAnalytics,
+  trackSearchAnalyticsOnce,
+} from "../lib/analytics-client";
+import {
+  analyticsCacheStatus,
+  analyticsDuration,
+  analyticsEvidenceCount,
+  analyticsFailureCode,
+  analyticsInstitution,
+  analyticsQueryLengthBucket,
+  analyticsReferrerKind,
+  analyticsSearchSummary,
+  analyticsSeriesIndex,
+  analyticsViewportBucket,
+  type AnalyticsEvidenceSource,
+  type AnalyticsEventProperties,
+  type AnalyticsPlacement,
+  type AnalyticsSearchSource,
+} from "../lib/analytics-events";
 import {
   evidencePreviewLabel,
   nearestMatchGroups,
@@ -30,8 +57,6 @@ import { requestVisualEvidence, requestVisualSearch } from "../lib/visual-transp
 import {
   DEFAULT_SEARCH_MODE,
   pageUrlForSearchState,
-  SEARCH_MODE_LABELS,
-  SEARCH_MODES,
   searchPageStateFromUrl,
   type SearchMode,
 } from "../lib/search-mode";
@@ -155,11 +180,6 @@ const SEARCH_PLACEHOLDERS: Record<SearchMode, string> = {
   keyword: "carriage, automobile, airplane",
 };
 
-const SEARCH_MODE_TITLES: Record<SearchMode, string> = {
-  embedding: "Search for what appears in the artwork",
-  keyword: "Search titles, artists, tags, and catalogue text",
-};
-
 const SEARCH_MODE_HELP: Record<SearchMode, string> = {
   embedding: "Describe what you want to see.",
   keyword: "Search words in the catalogue record.",
@@ -172,6 +192,8 @@ const CHART_HELP: Record<SearchMode, string> = {
 type SearchOptions = {
   syncInput?: boolean;
   requestedSelection?: ChartSelection | null;
+  analyticsSource?: AnalyticsSearchSource;
+  exampleIndex?: number;
 };
 
 type EvidenceEnvelope = {
@@ -184,6 +206,17 @@ type EvidenceContext = {
   baseResult?: SearchResponse;
   query?: string;
   mode?: SearchMode;
+  analyticsSource?: AnalyticsEvidenceSource;
+  searchId?: string;
+};
+
+type ArtworkAnalyticsContext = {
+  placement: AnalyticsPlacement;
+  searchMode: SearchMode;
+  searchId?: string;
+  seriesIndex: number;
+  binKey?: string;
+  rank: number;
 };
 
 function isSearchResponse(value: unknown): value is SearchResponse {
@@ -214,7 +247,13 @@ function errorMessage(payload: unknown, fallback: string) {
     : fallback;
 }
 
-function ChartCalculationTooltip({ metric }: { metric: MetricMetadata }) {
+function ChartCalculationTooltip({
+  metric,
+  onOpen,
+}: {
+  metric: MetricMetadata;
+  onOpen?: () => void;
+}) {
   const tooltipId = "chart-calculation-tooltip";
   return (
     <span className="chart-info">
@@ -223,6 +262,9 @@ function ChartCalculationTooltip({ metric }: { metric: MetricMetadata }) {
         type="button"
         aria-label="How this graph is calculated"
         aria-describedby={tooltipId}
+        onPointerEnter={onOpen}
+        onFocus={onOpen}
+        onClick={onOpen}
       >
         <svg viewBox="0 0 18 18" aria-hidden="true">
           <circle cx="9" cy="9" r="7" />
@@ -246,6 +288,9 @@ function institutionLabel(value: string) {
   if (normalized === "aic" || normalized === "art institute of chicago") {
     return "Art Institute of Chicago";
   }
+  if (normalized === "cma" || normalized === "cleveland museum of art") {
+    return "Cleveland Museum of Art";
+  }
   return value || "Museum source unavailable";
 }
 
@@ -265,9 +310,44 @@ function corpusSummary(corpus: CorpusMetadata) {
     : `${corpus.count.toLocaleString()} ${itemNoun(corpus.count, corpus.countingUnit)} · ${label}`;
 }
 
-function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
+function ArtworkCard({
+  artwork,
+  analytics,
+}: {
+  artwork: EvidenceArtwork;
+  analytics: ArtworkAnalyticsContext;
+}) {
+  const institution = institutionLabel(artwork.institution);
+  const metadata = artwork.dateDisplay
+    ? `${institution} · ${artwork.dateDisplay}`
+    : institution;
+  const trackOpen = (inputMethod: TimelineInputMethod) => trackSearchAnalytics(
+    "artwork_open",
+    {
+      search_mode: analytics.searchMode,
+      placement: analytics.placement,
+      input_method: inputMethod,
+      institution: analyticsInstitution(artwork.institution),
+      rank: analytics.rank,
+      series_index: analytics.seriesIndex,
+      ...(analytics.binKey ? { bin_key: analytics.binKey } : {}),
+      has_image: Boolean(artwork.imageUrl),
+      contributor: artwork.contributor,
+    },
+    analytics.searchId,
+  );
+
   return (
-    <a className="artwork-card" href={artwork.sourceRecordUrl} target="_blank" rel="noreferrer">
+    <a
+      className="artwork-card"
+      href={artwork.sourceRecordUrl}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(event) => trackOpen(event.detail === 0 ? "keyboard" : "pointer")}
+      onAuxClick={(event) => {
+        if (event.button === 1) trackOpen("pointer");
+      }}
+    >
       <div className="artwork-image-wrap">
         {artwork.imageUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
@@ -284,9 +364,14 @@ function ArtworkCard({ artwork }: { artwork: EvidenceArtwork }) {
       </div>
       <div className="artwork-copy">
         <strong title={artwork.title || "Untitled"}>{artwork.title || "Untitled"}</strong>
-        <span title={artwork.artist}>{artwork.artist || "Unknown artist"}</span>
-        <em title={institutionLabel(artwork.institution)}>{institutionLabel(artwork.institution)}</em>
-        <small>{artwork.dateDisplay} ↗</small>
+        <span className="artwork-artist" title={artwork.artist || "Unknown artist"}>
+          {artwork.artist || "Unknown artist"}
+        </span>
+        <small className="artwork-meta" title={metadata}>
+          <span className="artwork-meta-text">{metadata}</span>
+          <span className="artwork-external" aria-hidden="true">↗</span>
+        </small>
+        <span className="sr-only">Opens the museum record in a new tab.</span>
       </div>
     </a>
   );
@@ -299,6 +384,7 @@ function ArtworkCardSkeleton() {
       <div className="artwork-copy">
         <span className="artwork-loading-line artwork-loading-title" />
         <span className="artwork-loading-line artwork-loading-artist" />
+        <span className="artwork-loading-line artwork-loading-meta" />
       </div>
     </div>
   );
@@ -309,6 +395,8 @@ function ProgressiveArtworkGrid({
   emptyMessage,
   isLoading,
   onVisibleCountChange,
+  onDepthReached,
+  analytics,
   showEmpty,
   visibleCount,
 }: {
@@ -316,6 +404,8 @@ function ProgressiveArtworkGrid({
   emptyMessage: string;
   isLoading: boolean;
   onVisibleCountChange: Dispatch<SetStateAction<number>>;
+  onDepthReached?: (visibleCount: number) => void;
+  analytics: Omit<ArtworkAnalyticsContext, "rank">;
   showEmpty: boolean;
   visibleCount: number;
 }) {
@@ -345,14 +435,23 @@ function ProgressiveArtworkGrid({
     return () => observer.disconnect();
   }, [artworks.length, hasMore, isLoading, onVisibleCountChange, visibleCount]);
 
+  useEffect(() => {
+    if (isLoading || visibleCount <= INITIAL_VISIBLE_WORKS) return;
+    onDepthReached?.(Math.min(visibleCount, artworks.length));
+  }, [artworks.length, isLoading, onDepthReached, visibleCount]);
+
   return (
     <>
       <div className="artwork-grid" aria-busy={isLoading}>
         {isLoading && Array.from({ length: INITIAL_VISIBLE_WORKS }, (_, index) => (
           <ArtworkCardSkeleton key={index} />
         ))}
-        {!isLoading && visibleArtworks.map((artwork) => (
-          <ArtworkCard key={artwork.artworkId} artwork={artwork} />
+        {!isLoading && visibleArtworks.map((artwork, index) => (
+          <ArtworkCard
+            key={artwork.artworkId}
+            artwork={artwork}
+            analytics={{ ...analytics, rank: index + 1 }}
+          />
         ))}
         {!isLoading && showEmpty && <p className="no-works">{emptyMessage}</p>}
       </div>
@@ -403,6 +502,7 @@ export default function Home() {
   const hoverPreviewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hoverPreviewCache = useRef(new Map<string, EvidenceArtwork | null>());
   const failedHoverArtworkIds = useRef(new Map<string, Set<string>>());
+  const resultSearchId = useRef<string | undefined>(undefined);
 
   function resetHoverPreview(clearCache = false) {
     hoverPreviewRequestId.current += 1;
@@ -510,6 +610,9 @@ export default function Home() {
     nextMode: SearchMode = searchMode,
     options: SearchOptions = {},
   ) {
+    const analyticsSource = options.analyticsSource ?? "form";
+    const searchId = createAnalyticsId(window.crypto);
+    const startedAt = performance.now();
     const invalidated = invalidateExplorerRequests(
       requestId.current,
       evidenceRequestId.current,
@@ -522,9 +625,19 @@ export default function Home() {
     evidenceAbort.current = null;
     const currentRequest = invalidated.searchRequestId;
 
+    let parsedQuery: ReturnType<typeof parseConceptQuery>;
     try {
-      parseConceptQuery(nextQuery);
+      parsedQuery = parseConceptQuery(nextQuery);
     } catch (caught) {
+      trackSearchAnalytics("search_attempt", {
+        search_mode: nextMode,
+        source: analyticsSource,
+        outcome: "invalid",
+        query_count: 0,
+        query_length_bucket: analyticsQueryLengthBucket(nextQuery.length),
+        ...(options.exampleIndex === undefined ? {} : { example_index: options.exampleIndex }),
+        error_code: caught instanceof QuerySyntaxError ? caught.code : "invalid_query",
+      }, searchId);
       const status = invalidSearchStatus(
         caught instanceof QuerySyntaxError ? caught.message : "Check the query and try again.",
       );
@@ -536,6 +649,14 @@ export default function Home() {
     }
 
     const trimmedQuery = nextQuery.trim();
+    trackSearchAnalytics("search_attempt", {
+      search_mode: nextMode,
+      source: analyticsSource,
+      outcome: "accepted",
+      query_count: parsedQuery.length,
+      query_length_bucket: analyticsQueryLengthBucket(nextQuery.length),
+      ...(options.exampleIndex === undefined ? {} : { example_index: options.exampleIndex }),
+    }, searchId);
     resetHoverPreview(true);
     const controller = new AbortController();
     searchAbort.current = controller;
@@ -545,6 +666,8 @@ export default function Home() {
     if (options.syncInput !== false) setInput(trimmedQuery);
     setSubmittedQuery(trimmedQuery);
     setLoading(true);
+    resultSearchId.current = undefined;
+    setResult(null);
     setEvidenceLoading(false);
     setError(null);
     setEvidenceError(null);
@@ -552,20 +675,47 @@ export default function Home() {
     setVisibleEvidenceCount(INITIAL_VISIBLE_WORKS);
     setHiddenQueryIds(new Set());
 
+    let analyticsFinished = false;
+    let statusCode: number | undefined;
+    let transport: "direct" | "proxy" | undefined;
+    let cacheStatus: string | undefined;
+    const finishSearchAnalytics = (
+      properties: Omit<
+        AnalyticsEventProperties["search_result"],
+        "search_mode" | "source" | "duration_ms" | "query_count"
+      >,
+    ) => {
+      if (analyticsFinished) return;
+      analyticsFinished = true;
+      trackSearchAnalytics("search_result", {
+        search_mode: nextMode,
+        source: analyticsSource,
+        duration_ms: analyticsDuration(startedAt, performance.now()),
+        query_count: parsedQuery.length,
+        ...properties,
+      }, searchId);
+    };
+
     try {
       let payload: SearchResponse;
 
       if (nextMode === "keyword") {
-        const { response, payload: body } = await requestKeywordSearch(trimmedQuery, {
+        const { response, payload: body, via } = await requestKeywordSearch(trimmedQuery, {
           signal: controller.signal,
         });
+        statusCode = response.status;
+        transport = via;
+        cacheStatus = analyticsCacheStatus(response.headers.get("CF-Cache-Status"));
         if (!response.ok) throw new Error(errorMessage(body, "Search failed."));
         if (!isSearchResponse(body)) throw new Error("The search service returned an unsupported response.");
         payload = body;
       } else {
-        const { response, payload: body } = await requestVisualSearch(trimmedQuery, {
+        const { response, payload: body, via } = await requestVisualSearch(trimmedQuery, {
           signal: controller.signal,
         });
+        statusCode = response.status;
+        transport = via;
+        cacheStatus = analyticsCacheStatus(response.headers.get("CF-Cache-Status"));
         if (!response.ok) {
           throw new Error(errorMessage(
             body,
@@ -578,7 +728,21 @@ export default function Home() {
         payload = body;
       }
 
-      if (requestId.current !== currentRequest) return;
+      if (requestId.current !== currentRequest) {
+        finishSearchAnalytics({
+          outcome: "aborted",
+          ...(statusCode ? { status_code: statusCode } : {}),
+          ...(transport ? { transport } : {}),
+          ...(cacheStatus ? { cache_status: cacheStatus } : {}),
+        });
+        return;
+      }
+      finishSearchAnalytics({
+        ...analyticsSearchSummary(payload),
+        ...(statusCode ? { status_code: statusCode } : {}),
+        ...(transport ? { transport } : {}),
+        ...(cacheStatus ? { cache_status: cacheStatus } : {}),
+      });
       const requestedSelection = selectionFromRequestedState(
         payload,
         options.requestedSelection,
@@ -595,6 +759,7 @@ export default function Home() {
         nextMode,
         payload.selectedEvidence,
       );
+      resultSearchId.current = searchId;
       setResult(payload);
       setSelection(nextSelection);
       replacePageState(trimmedQuery, nextMode, nextSelection);
@@ -605,11 +770,38 @@ export default function Home() {
             baseResult: payload,
             query: trimmedQuery,
             mode: nextMode,
+            analyticsSource: options.requestedSelection ? "url_restore" : "auto_peak",
+            searchId,
           });
         });
+      } else if (nextSelection && payload.selectedEvidence) {
+        const resultCount = analyticsEvidenceCount(payload.selectedEvidence);
+        trackSearchAnalytics("evidence_result", {
+          search_mode: nextMode,
+          source: options.requestedSelection ? "url_restore" : "auto_peak",
+          outcome: resultCount > 0 ? "success" : "empty",
+          duration_ms: 0,
+          bin_key: nextSelection.binKey,
+          series_index: analyticsSeriesIndex(payload, nextSelection.queryId),
+          cached: true,
+          result_count: resultCount,
+        }, searchId);
       }
     } catch (caught) {
-      if (caught instanceof DOMException && caught.name === "AbortError") return;
+      if (caught instanceof DOMException && caught.name === "AbortError") {
+        finishSearchAnalytics({
+          outcome: "aborted",
+          ...(transport ? { transport } : {}),
+        });
+        return;
+      }
+      finishSearchAnalytics({
+        outcome: "error",
+        ...(statusCode ? { status_code: statusCode } : {}),
+        error_code: analyticsFailureCode(caught, statusCode),
+        ...(transport ? { transport } : {}),
+        ...(cacheStatus ? { cache_status: cacheStatus } : {}),
+      });
       if (requestId.current !== currentRequest) return;
       const message = caught instanceof Error ? caught.message : "Search failed.";
       setError(nextMode === "embedding" && caught instanceof TypeError
@@ -629,8 +821,12 @@ export default function Home() {
     setSelection(nextSelection);
     const activeQuery = context.query ?? submittedQuery;
     const activeMode = context.mode ?? submittedSearchMode;
+    const analyticsSource = context.analyticsSource ?? "point";
+    const searchId = context.searchId ?? resultSearchId.current;
+    const startedAt = performance.now();
     replacePageState(activeQuery, activeMode, nextSelection);
     const activeResult = context.baseResult ?? result;
+    const seriesIndex = analyticsSeriesIndex(activeResult, nextSelection.queryId);
     const cached = evidenceMatchesSelection(activeResult?.selectedEvidence, nextSelection);
     const prepared = prepareEvidenceRequest(
       evidenceRequestId.current,
@@ -641,10 +837,43 @@ export default function Home() {
     evidenceAbort.current = prepared.controller;
     setEvidenceLoading(prepared.loading);
     setEvidenceError(null);
-    if (cached) return;
+    if (cached) {
+      const resultCount = analyticsEvidenceCount(activeResult?.selectedEvidence ?? null);
+      trackSearchAnalytics("evidence_result", {
+        search_mode: activeMode,
+        source: analyticsSource,
+        outcome: resultCount > 0 ? "success" : "empty",
+        duration_ms: 0,
+        bin_key: nextSelection.binKey,
+        series_index: seriesIndex,
+        cached: true,
+        result_count: resultCount,
+      }, searchId);
+      return;
+    }
 
     const currentRequest = prepared.requestId;
     const controller = prepared.controller!;
+    let statusCode: number | undefined;
+    let analyticsFinished = false;
+    const finishEvidenceAnalytics = (
+      outcome: "success" | "empty" | "error" | "aborted",
+      extras: { result_count?: number; error_code?: string } = {},
+    ) => {
+      if (analyticsFinished) return;
+      analyticsFinished = true;
+      trackSearchAnalytics("evidence_result", {
+        search_mode: activeMode,
+        source: analyticsSource,
+        outcome,
+        duration_ms: analyticsDuration(startedAt, performance.now()),
+        bin_key: nextSelection.binKey,
+        series_index: seriesIndex,
+        cached: false,
+        ...(statusCode ? { status_code: statusCode } : {}),
+        ...extras,
+      }, searchId);
+    };
     try {
       let selectedEvidence: SelectedEvidence | null;
       if (activeMode === "keyword") {
@@ -653,6 +882,7 @@ export default function Home() {
           nextSelection,
           { signal: controller.signal },
         );
+        statusCode = response.status;
         if (!response.ok) throw new Error(errorMessage(payload, "Evidence could not be loaded."));
         if (!isEvidenceEnvelope(payload)) {
           throw new Error("The evidence service returned unsupported evidence.");
@@ -664,6 +894,7 @@ export default function Home() {
           nextSelection,
           { signal: controller.signal },
         );
+        statusCode = response.status;
         if (!response.ok) {
           throw new Error(errorMessage(
             payload,
@@ -675,7 +906,14 @@ export default function Home() {
         }
         selectedEvidence = payload.selectedEvidence;
       }
-      if (evidenceRequestId.current !== currentRequest) return;
+      if (evidenceRequestId.current !== currentRequest) {
+        finishEvidenceAnalytics("aborted");
+        return;
+      }
+      const resultCount = analyticsEvidenceCount(selectedEvidence);
+      finishEvidenceAnalytics(resultCount > 0 ? "success" : "empty", {
+        result_count: resultCount,
+      });
       cacheSelectedEvidencePreview(
         hoverPreviewCache.current,
         failedHoverArtworkIds.current,
@@ -685,7 +923,13 @@ export default function Home() {
       );
       setResult((current) => current ? { ...current, selectedEvidence } : current);
     } catch (caught) {
-      if (caught instanceof DOMException && caught.name === "AbortError") return;
+      if (caught instanceof DOMException && caught.name === "AbortError") {
+        finishEvidenceAnalytics("aborted");
+        return;
+      }
+      finishEvidenceAnalytics("error", {
+        error_code: analyticsFailureCode(caught, statusCode),
+      });
       if (evidenceRequestId.current !== currentRequest) return;
       setEvidenceError(caught instanceof Error ? caught.message : "Evidence could not be loaded.");
     } finally {
@@ -695,9 +939,31 @@ export default function Home() {
 
   useEffect(() => {
     const initial = searchPageStateFromUrl(window.location.href, INITIAL_QUERY);
+    const initialUrl = new URL(window.location.href);
+    const pageSource = initial.selection
+      ? "shared_selection"
+      : initialUrl.searchParams.has("q") || initialUrl.searchParams.has("searchMode")
+        ? "shared_query"
+        : "default";
+    let queryCount = 1;
+    try {
+      queryCount = parseConceptQuery(initial.query).length;
+    } catch {
+      // The search flow will report any invalid shared query in more detail.
+    }
+    trackPageAnalyticsOnce("page_view", {
+      search_mode: initial.mode,
+      source: pageSource,
+      referrer_kind: analyticsReferrerKind(document.referrer, window.location.hostname),
+      viewport_bucket: analyticsViewportBucket(window.innerWidth),
+      query_count: queryCount,
+    });
     setInput(initial.query);
     setSearchMode(initial.mode);
-    void search(initial.query, initial.mode, { requestedSelection: initial.selection });
+    void search(initial.query, initial.mode, {
+      requestedSelection: initial.selection,
+      analyticsSource: pageSource === "default" ? "initial_default" : "url_restore",
+    });
     return () => {
       searchAbort.current?.abort();
       evidenceAbort.current?.abort();
@@ -735,38 +1001,63 @@ export default function Home() {
     ? "Visual matches over time"
     : "Metadata matches over time";
 
+  const handleEvidenceDepthReached = useCallback((nextVisibleCount: number) => {
+    if (!selection) return;
+    const searchId = resultSearchId.current;
+    trackSearchAnalyticsOnce(
+      `gallery_depth:${searchId ?? "none"}:${selection.queryId}:${selection.binKey}:${nextVisibleCount}`,
+      "gallery_depth",
+      {
+        search_mode: submittedSearchMode,
+        placement: "evidence",
+        visible_count: nextVisibleCount,
+        series_index: analyticsSeriesIndex(result, selection.queryId),
+        bin_key: selection.binKey,
+      },
+      searchId,
+    );
+  }, [result, selection, submittedSearchMode]);
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void search(input, searchMode);
+    void search(input, searchMode, { analyticsSource: "form" });
   }
 
-  function changeSearchMode(nextMode: SearchMode) {
-    if (nextMode === searchMode) return;
-    void search(input, nextMode, { syncInput: false });
-  }
-
-  function activateSeries(queryId: string) {
+  function activateSeries(queryId: string, interaction: TimelineSeriesInteraction) {
     if (!result || hiddenQueryIds.has(queryId)) return;
+    trackSearchAnalytics("series_activate", {
+      search_mode: submittedSearchMode,
+      source: interaction.source,
+      input_method: interaction.inputMethod,
+      series_index: analyticsSeriesIndex(result, queryId),
+    }, resultSearchId.current);
     const candidate = selection && result.series.find((series) => series.queryId === queryId)?.points.some(
       (point) => point.binKey === selection.binKey,
     )
       ? { queryId, binKey: selection.binKey }
       : peakSelection(result, queryId);
-    if (candidate) void loadEvidence(candidate);
+    if (candidate) void loadEvidence(candidate, { analyticsSource: "series_activate" });
     else setSelection(null);
   }
 
-  function toggleSeries(queryId: string) {
+  function toggleSeries(queryId: string, inputMethod: TimelineInputMethod) {
     const nextHidden = new Set(hiddenQueryIds);
     const isHidden = nextHidden.has(queryId);
     if (isHidden) nextHidden.delete(queryId);
     else nextHidden.add(queryId);
     setHiddenQueryIds(nextHidden);
+    trackSearchAnalytics("series_toggle", {
+      search_mode: submittedSearchMode,
+      action: isHidden ? "show" : "hide",
+      input_method: inputMethod,
+      series_index: analyticsSeriesIndex(result, queryId),
+      visible_count: Math.max(0, (result?.queries.length ?? 0) - nextHidden.size),
+    }, resultSearchId.current);
 
     if (!isHidden && selection?.queryId === queryId && result) {
       const replacement = result.queries.find((query) => !nextHidden.has(query.id));
       const candidate = replacement ? peakSelection(result, replacement.id) : null;
-      if (candidate) void loadEvidence(candidate);
+      if (candidate) void loadEvidence(candidate, { analyticsSource: "series_replacement" });
       else setSelection(null);
     }
   }
@@ -781,20 +1072,6 @@ export default function Home() {
         <section className="search-area" aria-label="Search museum collections">
           <div className="search-controls">
             <div className="search-toolbar">
-              <span className="search-mode-toggle" role="group" aria-label="Search method">
-                {SEARCH_MODES.map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    aria-pressed={searchMode === mode}
-                    title={SEARCH_MODE_TITLES[mode]}
-                    onClick={() => changeSearchMode(mode)}
-                  >
-                    {SEARCH_MODE_LABELS[mode]}
-                  </button>
-                ))}
-              </span>
-
               <form className="search-form" onSubmit={submit}>
                 <label className="sr-only" htmlFor="concept-search">
                   {SEARCH_INPUT_LABELS[searchMode]}
@@ -819,10 +1096,22 @@ export default function Home() {
               <span className="search-mode-help" id="search-mode-help">
                 {SEARCH_MODE_HELP[searchMode]}
               </span>
-              <span>Try:</span>
-              {exampleQueries.map((example) => (
-                <button key={example} type="button" onClick={() => void search(example, searchMode)}>{example}</button>
-              ))}
+              <span className="example-query-label">Try:</span>
+              <ul className="example-query-list">
+                {exampleQueries.map((example, index) => (
+                  <li key={example}>
+                    <button
+                      type="button"
+                      onClick={() => void search(example, searchMode, {
+                        analyticsSource: "example",
+                        exampleIndex: index,
+                      })}
+                    >
+                      {example}
+                    </button>
+                  </li>
+                ))}
+              </ul>
             </div>
 
             {errorPlacement === "inline" && <div className="search-error" role="alert">{error}</div>}
@@ -839,7 +1128,20 @@ export default function Home() {
                     : "Searching the catalogue…"
                   : resultsTitle}
               </h2>
-              {!loading && result && <ChartCalculationTooltip metric={result.metric} />}
+              {!loading && result && (
+                <ChartCalculationTooltip
+                  metric={result.metric}
+                  onOpen={() => trackSearchAnalyticsOnce(
+                    `help:calculation:${resultSearchId.current ?? "none"}`,
+                    "help_open",
+                    {
+                      search_mode: submittedSearchMode,
+                      target: "calculation",
+                    },
+                    resultSearchId.current,
+                  )}
+                />
+              )}
               {!loading && yearRange && <span>{yearRange}</span>}
             </div>
             {result && !loading && (
@@ -870,9 +1172,30 @@ export default function Home() {
               selection={selection}
               hiddenQueryIds={hiddenQueryIds}
               hoverPreview={hoverPreview}
-              onSelect={(nextSelection) => void loadEvidence(nextSelection)}
+              onSelect={(nextSelection, inputMethod) => {
+                if (
+                  selection?.queryId === nextSelection.queryId &&
+                  selection.binKey === nextSelection.binKey
+                ) return;
+                trackSearchAnalytics("point_select", {
+                  search_mode: submittedSearchMode,
+                  input_method: inputMethod,
+                  bin_key: nextSelection.binKey,
+                  series_index: analyticsSeriesIndex(result, nextSelection.queryId),
+                }, resultSearchId.current);
+                void loadEvidence(nextSelection, { analyticsSource: "point" });
+              }}
               onActivateSeries={activateSeries}
               onToggleSeries={toggleSeries}
+              onHelpOpen={() => trackSearchAnalyticsOnce(
+                `help:chart_reading:${resultSearchId.current ?? "none"}`,
+                "help_open",
+                {
+                  search_mode: submittedSearchMode,
+                  target: "chart_reading",
+                },
+                resultSearchId.current,
+              )}
               onHoverSelection={handleHoverSelection}
               onHoverPreviewError={handleHoverPreviewError}
             />
@@ -907,8 +1230,18 @@ export default function Home() {
                   <p>Showing {artworks.length} closest result{artworks.length === 1 ? "" : "s"}</p>
                 </div>
                 <div className="artwork-grid">
-                  {artworks.map((artwork) => (
-                    <ArtworkCard key={artwork.artworkId} artwork={artwork} />
+                  {artworks.map((artwork, index) => (
+                    <ArtworkCard
+                      key={artwork.artworkId}
+                      artwork={artwork}
+                      analytics={{
+                        placement: "nearest",
+                        searchMode: submittedSearchMode,
+                        searchId: resultSearchId.current,
+                        seriesIndex: analyticsSeriesIndex(result, query.id),
+                        rank: index + 1,
+                      }}
+                    />
                   ))}
                 </div>
               </div>
@@ -948,6 +1281,14 @@ export default function Home() {
               ? "No keyword matches in this period."
               : "No strong visual matches in this period."}
             isLoading={evidenceLoading}
+            analytics={{
+              placement: "evidence",
+              searchMode: submittedSearchMode,
+              searchId: resultSearchId.current,
+              seriesIndex: analyticsSeriesIndex(result, selection?.queryId ?? ""),
+              ...(selection ? { binKey: selection.binKey } : {}),
+            }}
+            onDepthReached={handleEvidenceDepthReached}
             onVisibleCountChange={setVisibleEvidenceCount}
             showEmpty={Boolean(!evidenceError && selection && evidenceItems.length === 0 && !loading)}
             visibleCount={visibleEvidenceCount}
@@ -957,7 +1298,7 @@ export default function Home() {
 
         <footer className="source-footer">
           {submittedSearchMode === "embedding"
-            ? "Visual search uses public-domain artwork images and CC0 catalog data from The Metropolitan Museum of Art and the National Gallery of Art."
+            ? "Visual search uses public-domain artwork images and CC0 catalog data from The Metropolitan Museum of Art, the National Gallery of Art, and the Cleveland Museum of Art."
             : "Metadata search uses catalog data from The Metropolitan Museum of Art Open Access collection."}
         </footer>
       </div>

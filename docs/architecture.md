@@ -31,7 +31,16 @@ ArtiFact is not automatically the production source of truth:
 
 #### Production corpus
 
-Build source adapters for official bulk releases from the [Met](https://github.com/metmuseum/openaccess), [National Gallery of Art](https://github.com/NationalGalleryOfArt/opendata), [Art Institute of Chicago](https://api.artic.edu/docs/), and [Rijksmuseum](https://data.rijksmuseum.nl/). This is scheduled ETL from published data, not an HTML crawl. Retain source payloads and produce a named snapshot such as `met-nga-aic-rijks-2026-08-v1` with source URLs, retrieval timestamps, checksums, adapter versions, and row counts.
+The implemented source adapters consume official bulk releases or saved API
+snapshots from the [Met](https://github.com/metmuseum/openaccess), [National
+Gallery of Art](https://github.com/NationalGalleryOfArt/opendata), [Cleveland
+Museum of Art](https://github.com/ClevelandMuseumArt/openaccess), [Art Institute
+of Chicago](https://api.artic.edu/docs/), and [SMK – National Gallery of
+Denmark](https://www.smk.dk/en/article/smk-api/). Rijksmuseum remains a planned
+adapter. This is scheduled ETL from published machine-readable data, not an
+HTML crawl. Retain source payloads and produce a named snapshot such as
+`met-nga-cma-aic-smk-2026-09-v1` with source URLs, retrieval timestamps,
+checksums, adapter versions, and row counts.
 
 Store one row per searchable source catalog record and give every row a stable
 `physical_object_id`. Sources such as the NGA can publish inseparable child
@@ -56,7 +65,13 @@ be stated in the metric: a mixed source snapshot that retains child records is
 honestly a `catalog-record` view, while derived `physical-object` and
 `visual-cluster` views can aggregate those explicit identifiers later.
 
-Only include images whose terms permit the intended download, embedding, storage, and display behavior. Public-domain-only images will underrepresent modern and contemporary art, so surface rights and digitization coverage by period rather than interpreting a late-period decline as an art-historical fact.
+Only include images whose terms permit the intended download, embedding,
+storage, and display behavior. A generic availability flag or truthy
+`public_domain` value is not enough: each adapter must bind the positive source
+signal to an exact rights URI and a trusted image host. Public-domain-only
+images will underrepresent modern and contemporary art, so surface rights and
+digitization coverage by period rather than interpreting a late-period decline
+as an art-historical fact.
 
 ### 2. Normalize dates and precompute weights
 

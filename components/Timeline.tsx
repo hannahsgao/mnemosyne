@@ -39,12 +39,20 @@ type TimelineProps = {
   description?: string;
   selection: ChartSelection | null;
   hiddenQueryIds: Set<string>;
-  onSelect: (selection: ChartSelection) => void;
-  onActivateSeries: (queryId: string) => void;
-  onToggleSeries: (queryId: string) => void;
+  onSelect: (selection: ChartSelection, inputMethod: TimelineInputMethod) => void;
+  onActivateSeries: (queryId: string, interaction: TimelineSeriesInteraction) => void;
+  onToggleSeries: (queryId: string, inputMethod: TimelineInputMethod) => void;
+  onHelpOpen?: () => void;
   hoverPreview?: TimelineHoverPreview | null;
   onHoverSelection?: (selection: ChartSelection | null) => void;
   onHoverPreviewError?: (preview: TimelineHoverPreview) => void;
+};
+
+export type TimelineInputMethod = "pointer" | "keyboard";
+
+export type TimelineSeriesInteraction = {
+  source: "endpoint" | "legend";
+  inputMethod: TimelineInputMethod;
 };
 
 type HoveredPoint = {
@@ -190,6 +198,7 @@ export function Timeline({
   onSelect,
   onActivateSeries,
   onToggleSeries,
+  onHelpOpen,
   hoverPreview = null,
   onHoverSelection,
   onHoverPreviewError,
@@ -218,6 +227,7 @@ export function Timeline({
   const drag = useRef<DragState | null>(null);
   const pinch = useRef<PinchState | null>(null);
   const pointers = useRef(new Map<number, number>());
+  const pendingPointerSelection = useRef<ChartSelection | null>(null);
   const queryById = useMemo(
     () => new Map(queries.map((query, index) => [query.id, { query, index }])),
     [queries],
@@ -552,6 +562,7 @@ export function Timeline({
 
   function handlePointerDown(event: ReactPointerEvent<SVGRectElement>) {
     if (event.pointerType === "mouse" && event.button !== 0) return;
+    pendingPointerSelection.current = null;
     event.preventDefault();
     event.currentTarget.focus({ preventScroll: true });
     stopViewportAnimation();
@@ -655,10 +666,10 @@ export function Timeline({
       setDragging(false);
     }
 
-    if (wasClick) {
-      const next = hoverFromPointer(event);
-      if (next) onSelect({ queryId: next.queryId, binKey: next.binKey });
-    }
+    const next = wasClick ? hoverFromPointer(event) : null;
+    pendingPointerSelection.current = next
+      ? { queryId: next.queryId, binKey: next.binKey }
+      : null;
   }
 
   function handleWheel(event: ReactWheelEvent<SVGRectElement>) {
@@ -761,8 +772,12 @@ export function Timeline({
       next = keyboardHover(nextQueryId, closestIndex);
     } else if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
+      if (event.repeat) return;
       if (!activePlot.pointsByBin.has(displayBins[active.binIndex].key)) return;
-      onSelect({ queryId: active.queryId, binKey: displayBins[active.binIndex].key });
+      onSelect(
+        { queryId: active.queryId, binKey: displayBins[active.binIndex].key },
+        "keyboard",
+      );
       return;
     } else return;
     event.preventDefault();
@@ -944,11 +959,18 @@ export function Timeline({
             role="button"
             tabIndex={0}
             aria-label={`Focus ${plot.query.label}`}
-            onClick={() => onActivateSeries(plot.item.queryId)}
+            onClick={(event) => onActivateSeries(plot.item.queryId, {
+              source: "endpoint",
+              inputMethod: event.detail === 0 ? "keyboard" : "pointer",
+            })}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
-                onActivateSeries(plot.item.queryId);
+                if (event.repeat) return;
+                onActivateSeries(plot.item.queryId, {
+                  source: "endpoint",
+                  inputMethod: "keyboard",
+                });
               }
             }}
           >
@@ -981,11 +1003,19 @@ export function Timeline({
           onPointerMove={handlePointerMove}
           onPointerUp={(event) => finishPointer(event)}
           onPointerCancel={(event) => finishPointer(event, true)}
+          onClick={(event) => {
+            const next = pendingPointerSelection.current;
+            pendingPointerSelection.current = null;
+            if (event.detail === 1 && next) onSelect(next, "pointer");
+          }}
           onPointerLeave={() => {
             if (pointers.current.size === 0) updateHovered(null);
           }}
           onWheel={handleWheel}
-          onDoubleClick={resetViewport}
+          onDoubleClick={() => {
+            pendingPointerSelection.current = null;
+            resetViewport();
+          }}
           onKeyDown={handleKeyboard}
           onBlur={() => updateHovered(null)}
         />
@@ -1037,7 +1067,10 @@ export function Timeline({
                 <button
                   className="legend-series-button"
                   type="button"
-                  onClick={() => onActivateSeries(query.id)}
+                  onClick={(event) => onActivateSeries(query.id, {
+                    source: "legend",
+                    inputMethod: event.detail === 0 ? "keyboard" : "pointer",
+                  })}
                   disabled={hidden}
                   aria-current={selected ? "true" : undefined}
                 >
@@ -1047,7 +1080,10 @@ export function Timeline({
                 <button
                   className="legend-visibility"
                   type="button"
-                  onClick={() => onToggleSeries(query.id)}
+                  onClick={(event) => onToggleSeries(
+                    query.id,
+                    event.detail === 0 ? "keyboard" : "pointer",
+                  )}
                   aria-pressed={!hidden}
                   aria-label={`${hidden ? "Show" : "Hide"} ${query.label}`}
                 >
@@ -1069,7 +1105,12 @@ export function Timeline({
         </div>
       </div>
       {description && (
-        <details className="timeline-note">
+        <details
+          className="timeline-note"
+          onToggle={(event) => {
+            if (event.currentTarget.open) onHelpOpen?.();
+          }}
+        >
           <summary>How to read this chart</summary>
           <p>{description}</p>
         </details>

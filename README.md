@@ -25,11 +25,13 @@ and a local SQLite FTS5 index:
 The embedding path provides visual-concept retrieval. Its offline builder
 streams each artwork through a pinned SigLIP 2 image tower, discards the pixels,
 and publishes a normalized float32 `embeddings.npy` matrix keyed back to compact
-museum metadata. The Met and National Gallery of Art adapters can be built as
-separate immutable bundles and merged without recomputing either source's
-vectors. That matrix is the canonical exact inner-product index; an exact FAISS
-`IndexFlatIP` file is optional. Requests run only the matching text tower, exact
-retrieval, and global top-1% concentration lift.
+museum metadata. The Met, National Gallery of Art, Cleveland Museum of Art,
+Art Institute of Chicago, and SMK adapters can be built as separate immutable
+bundles and merged without recomputing existing source vectors. The deployed
+bundle combines The Met, NGA, and CMA. Its matrix is the canonical exact
+inner-product index; an exact FAISS `IndexFlatIP` file is optional. Requests run
+only the matching text tower, exact retrieval, and global top-1% concentration
+lift.
 
 The web app exposes URL-backed **Metadata / Visual** modes while retaining the
 internal `keyword` and `embedding` values. Visual is the default and is not
@@ -195,10 +197,18 @@ fixture-only startup command.
 The production Hugging Face Docker Space, private artifact-bucket workflow, and
 safe allowlisted staging process are documented in
 [`deploy/huggingface/README.md`](deploy/huggingface/README.md). That deployment
-uses the merged 199,474-catalog-record Met and National Gallery of Art bundle,
-with a 199,474 × 768 float32 matrix and the exact pinned
-`google/siglip2-base-patch16-224` revision. The approximately 877 MB artifact
-bundle remains in the private artifact bucket rather than this repository.
+uses the merged 240,278-catalog-record Met, National Gallery of Art, and
+Cleveland Museum of Art bundle, with a 240,278 × 768 float32 matrix and the
+exact pinned `google/siglip2-base-patch16-224` revision. The approximately 1.0
+GB artifact bundle remains in the private artifact bucket rather than this
+repository.
+
+## Usage analytics
+
+Product events use a privacy-bounded Cloudflare Zaraz taxonomy, with an optional
+D1 mirror disabled by default. See [`docs/analytics.md`](docs/analytics.md) for
+the event catalog, Cloudflare dashboard setup, privacy requirements, reporting,
+and retention behavior.
 
 ## Verification
 
@@ -285,7 +295,8 @@ Sites owns the real D1 resource wiring.
 ## Data attribution
 
 Production Visual search uses public-domain images and CC0 catalog data from
-The Metropolitan Museum of Art and the National Gallery of Art.
+The Metropolitan Museum of Art, the National Gallery of Art, and the Cleveland
+Museum of Art.
 
 The fallback uses the [Art Institute of Chicago public API](https://api.artic.edu/docs/)
 and its IIIF image service. Artifact builds retain source-record, metadata
