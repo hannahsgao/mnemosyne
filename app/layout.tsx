@@ -55,6 +55,12 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <head>
         <link rel="preconnect" href="https://images.metmuseum.org" />
         <link rel="preconnect" href="https://api.nga.gov" />
+        {process.env.NODE_ENV === "production" && (
+          <script
+            src="https://hannahgao.studio/cdn-cgi/zaraz/i.js"
+            referrerPolicy="origin"
+          />
+        )}
       </head>
       <body>{children}</body>
     </html>
