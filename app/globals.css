@@ -877,7 +877,7 @@ a { color: inherit; text-decoration: none; }
     overflow: visible;
     white-space: normal;
   }
-  .search-controls:focus-within .query-row { display: grid; }
+  .query-row.mobile-open { display: grid; }
   .query-row .search-mode-help {
     clip: rect(0, 0, 0, 0);
     clip-path: inset(50%);

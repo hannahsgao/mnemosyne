@@ -489,6 +489,7 @@ export default function Home() {
   const [hiddenQueryIds, setHiddenQueryIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [evidenceLoading, setEvidenceLoading] = useState(false);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [visibleEvidenceCount, setVisibleEvidenceCount] = useState(INITIAL_VISIBLE_WORKS);
   const [hoverPreview, setHoverPreview] = useState<TimelineHoverPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1020,6 +1021,7 @@ export default function Home() {
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setSuggestionsOpen(false);
     void search(input, searchMode, { analyticsSource: "form" });
   }
 
@@ -1081,6 +1083,17 @@ export default function Home() {
                     id="concept-search"
                     value={input}
                     onChange={(event) => setInput(event.target.value)}
+                    onClick={() => setSuggestionsOpen(true)}
+                    onFocus={() => setSuggestionsOpen(true)}
+                    onBlur={(event) => {
+                      const nextTarget = event.relatedTarget;
+                      if (!(nextTarget instanceof HTMLElement && nextTarget.closest(".search-controls"))) {
+                        setSuggestionsOpen(false);
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setSuggestionsOpen(false);
+                    }}
                     placeholder={SEARCH_PLACEHOLDERS[searchMode]}
                     maxLength={MAX_QUERY_LENGTH}
                     aria-describedby="search-mode-help"
@@ -1092,7 +1105,7 @@ export default function Home() {
               </form>
             </div>
 
-            <div className="query-row">
+            <div className={`query-row${suggestionsOpen ? " mobile-open" : ""}`}>
               <span className="search-mode-help" id="search-mode-help">
                 {SEARCH_MODE_HELP[searchMode]}
               </span>
@@ -1102,10 +1115,13 @@ export default function Home() {
                   <li key={example}>
                     <button
                       type="button"
-                      onClick={() => void search(example, searchMode, {
-                        analyticsSource: "example",
-                        exampleIndex: index,
-                      })}
+                      onClick={() => {
+                        setSuggestionsOpen(false);
+                        void search(example, searchMode, {
+                          analyticsSource: "example",
+                          exampleIndex: index,
+                        });
+                      }}
                     >
                       {example}
                     </button>
