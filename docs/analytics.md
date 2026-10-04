@@ -32,12 +32,11 @@ After Zaraz is enabled and the instrumented site version is deployed:
 3. Filter for the `mnemosyne_` prefix. User search totals are `mnemosyne_search_user`; automatic/default searches are `mnemosyne_search_automatic`; outbound clicks are `mnemosyne_artwork_open`.
 4. Search and evidence outcomes are encoded in the event name so the standard Monitoring view can count them without Advanced Monitoring. The flat properties remain available to Zaraz triggers and tools. Use the optional D1 report when exact dimensional breakdowns are required without sending data to another analytics provider.
 
-The Sites custom hostname is a DNS-only CNAME, so Cloudflare cannot auto-inject
-Zaraz into its HTML. Production loads Zaraz manually from the proxied
-`hannahgao.studio` apex immediately before `</head>`. Keep zone auto-injection
-off so this configuration does not also instrument the portfolio site. The
-cross-origin script uses `referrerpolicy="origin"`, which prevents the
-shareable query from entering the script request.
+Production loads Zaraz manually from the proxied `hannahgao.studio` apex
+immediately before `</head>`. Keep zone auto-injection off so this configuration
+does not also instrument the portfolio site. The cross-origin script uses
+`referrerpolicy="origin"`, which prevents the shareable query from entering the
+script request.
 
 Cloudflare requires at least one enabled Zaraz tool before the loader is
 available. Use an inert Custom HTML bootstrap with no external requests or
@@ -92,7 +91,7 @@ curl -H "Authorization: Bearer $MNEMOSYNE_ANALYTICS_TOKEN" \
 
 The report separates user and automatic searches and returns daily totals, event counts, search outcomes/durations, artwork opens, and evidence outcomes. It is `private, no-store`; missing configuration returns `404`, and invalid authorization returns `401`.
 
-The D1 report always queries at most the last 90 days. Old rows are purged on the next valid mirrored ingestion or authenticated report, with a persisted once-per-day guard. Because Sites does not currently expose a scheduled D1 cleanup binding here, this is activity-triggered retention rather than a wall-clock deletion guarantee.
+The D1 report always queries at most the last 90 days. Old rows are purged on the next valid mirrored ingestion or authenticated report, with a persisted once-per-day guard. This is activity-triggered retention rather than a wall-clock deletion guarantee.
 
 If the mirror is enabled, add a Cloudflare rate-limiting/WAF rule for `POST /api/analytics`. Same-origin browser headers and a strict schema reduce accidental or cross-site writes, but public browser telemetry cannot authenticate a determined non-browser client.
 
@@ -103,7 +102,7 @@ Run:
 ```sh
 npm run check
 npm test
-npm run build:sites
+npm run build:cloudflare
 ```
 
 The analytics tests cover batching, final-page flushes, opt-out signals, Zaraz-only mode, bounded queues, all ten client/Worker event contracts, streaming body limits, origin validation, D1 migration idempotency, background writes, and private report authorization.

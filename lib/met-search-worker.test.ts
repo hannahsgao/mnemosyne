@@ -268,6 +268,36 @@ test("unauthorized admin responses are private and never cached", async () => {
   assert.deepEqual(await response.json(), { error: "Unauthorized" });
 });
 
+test("authorized imports initialize a standalone D1 before writing", async () => {
+  const fixture = new FixtureDatabase();
+  const response = await handleMetServiceRequest(
+    new Request("https://mnemosyne.example/_admin/met/import", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer correct-token",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ kind: "finalize" }),
+    }),
+    {
+      DB: fixture as unknown as D1Database,
+      MNEMOSYNE_IMPORT_TOKEN: "correct-token",
+    },
+  );
+
+  assert.ok(response);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ready: true });
+  assert.equal(
+    fixture.queries.some((query) => query.includes("CREATE VIRTUAL TABLE IF NOT EXISTS artwork_fts")),
+    true,
+  );
+  assert.equal(
+    fixture.queries.some((query) => query.includes("CREATE TABLE IF NOT EXISTS corpus_meta")),
+    true,
+  );
+});
+
 test("request validation errors remain safe private 400 responses", async () => {
   const response = await handleMetServiceRequest(
     new Request("https://mnemosyne.example/v1/search", {

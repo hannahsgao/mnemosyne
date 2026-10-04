@@ -1,4 +1,5 @@
 import { keywordEvidenceSlices } from "../lib/evidence.ts";
+import { ensureMetSchema } from "./met-schema.ts";
 
 type D1Row = Record<string, unknown>;
 
@@ -677,6 +678,7 @@ function authorized(request: Request, token: string | undefined) {
 
 async function handleImport(request: Request, db: D1Database, token: string | undefined) {
   if (!authorized(request, token)) return privateJson({ error: "Unauthorized" }, 401);
+  await ensureMetSchema(db);
   if (request.method === "GET") {
     const [artwork, bin, cache] = await Promise.all([
       db.prepare("SELECT COUNT(*) AS count, MAX(row_id) AS max_row_id FROM artworks").first(),

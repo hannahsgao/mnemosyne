@@ -1,23 +1,18 @@
 import vinext from "vinext";
 import { defineConfig } from "vite";
-import hostingConfig from "./.openai/hosting.json";
-import { sites } from "./build/sites-vite-plugin";
 
-const { d1, r2 } = hostingConfig;
-
-const localBindingConfig = {
+const localBuildConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
-  cache: {
-    enabled: true,
-  },
-  assets: {
-    binding: "ASSETS",
-  },
-  d1_databases: d1
-    ? [{ binding: d1, database_name: "mnemosyne-d1", database_id: "00000000-0000-4000-8000-000000000000" }]
-    : [],
-  r2_buckets: r2 ? [{ binding: r2, bucket_name: "mnemosyne-r2" }] : [],
+  cache: { enabled: true },
+  assets: { binding: "ASSETS" },
+  d1_databases: [
+    {
+      binding: "DB",
+      database_name: "mnemosyne-production",
+      database_id: "00000000-0000-4000-8000-000000000000",
+    },
+  ],
 };
 
 export default defineConfig(async () => {
@@ -29,8 +24,10 @@ export default defineConfig(async () => {
   return {
     plugins: [
       vinext(),
-      sites(),
-      cloudflare({ viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] }, config: localBindingConfig }),
+      cloudflare({
+        viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
+        config: localBuildConfig,
+      }),
     ],
   };
 });

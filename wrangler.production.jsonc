@@ -1,0 +1,44 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mnemosyne",
+  "account_id": "c1f40a65f86a296029ea92b5a2ccd2bd",
+  "main": "./dist/server/index.js",
+  "compatibility_date": "2026-05-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": true,
+  "routes": [
+    {
+      "pattern": "mnemosyne.hannahgao.studio/*",
+      "zone_name": "hannahgao.studio"
+    }
+  ],
+  "no_bundle": true,
+  "rules": [
+    {
+      "type": "ESModule",
+      "globs": ["**/*.js", "**/*.mjs"]
+    }
+  ],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./dist/client"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mnemosyne-production",
+      "database_id": "96f75beb-0901-4dc1-bd69-eec2312cad65",
+      "migrations_dir": "./drizzle"
+    }
+  ],
+  "vars": {
+    "MNEMOSYNE_SEARCH_MODE": "artifact",
+    "MNEMOSYNE_KEYWORD_SEARCH_SERVICE_URL": "https://mnemosyne.hannahgao.studio/v1/search",
+    "MNEMOSYNE_EMBEDDING_SEARCH_SERVICE_URL": "https://hsgao-mnemosyne-visual-search.hf.space/v1/search",
+    "MNEMOSYNE_EMBEDDING_SEARCH_TIMEOUT_MS": "60000"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

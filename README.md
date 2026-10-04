@@ -252,21 +252,24 @@ corpus caveats, validation gates, and scaling decisions.
 
 ## Cloudflare deployment
 
-The production build uses the existing Sites project declared in
-`.openai/hosting.json`, including its D1 binding for metadata keyword search:
+Production runs as a standalone Cloudflare Worker with a D1 binding for
+metadata keyword search. The checked-in `wrangler.production.jsonc` is the
+authoritative runtime configuration:
 
 ```bash
 npm install
-npm run build:sites
+npm run build:cloudflare
+wrangler d1 migrations apply mnemosyne-production --remote --config wrangler.production.jsonc
+npm run deploy:cloudflare
 ```
 
 Publish the frontend only after the private Space health and arbitrary-query
-checks in the deployment runbook pass. In the existing Sites project's runtime
-environment, preserve the working keyword URL and set:
+checks in the deployment runbook pass. Configure these Worker variables and
+secrets before publishing:
 
 ```dotenv
 MNEMOSYNE_SEARCH_MODE=artifact
-MNEMOSYNE_KEYWORD_SEARCH_SERVICE_URL=KEEP_THE_EXISTING_WORKING_VALUE
+MNEMOSYNE_KEYWORD_SEARCH_SERVICE_URL=https://mnemosyne.hannahgao.studio/v1/search
 MNEMOSYNE_EMBEDDING_SEARCH_SERVICE_URL=https://THE_PRIVATE_SPACE.hf.space/v1/search
 MNEMOSYNE_EMBEDDING_SEARCH_SERVICE_TOKEN=SET_AS_A_SERVER_SIDE_SECRET
 MNEMOSYNE_EMBEDDING_SEARCH_TIMEOUT_MS=60000
@@ -279,7 +282,7 @@ existing service environment variable, or expose the token through a
 
 The outer Visual API responses emit the exact shared-cache policy
 `public, max-age=0, s-maxage=3600, stale-while-revalidate=86400`. Before launch,
-confirm that the Sites/Cloudflare deployment caches dynamic API responses by
+confirm that the Cloudflare Worker caches dynamic API responses by
 checking `CF-Cache-Status` twice for the same Visual URL and enable Workers
 caching or a narrow `/api/search` and `/api/evidence` cache rule if necessary.
 Before public launch, configure a Visual-only edge rate limit for
@@ -287,10 +290,10 @@ Before public launch, configure a Visual-only edge rate limit for
 provide one. The Python service's bounded request admission remains separate
 overload protection.
 
-The intended custom hostname is `mnemosyne.hannahgao.studio`. It is a separate
-subdomain: the portfolio Worker and DNS route for `hannahgao.studio` must not be
-changed. Do not deploy the generated `dist/server/wrangler.json` directly;
-Sites owns the real D1 resource wiring.
+The custom hostname is `mnemosyne.hannahgao.studio`. It is a separate subdomain:
+the portfolio Worker and DNS route for `hannahgao.studio` must not be changed.
+Deploy with the root `wrangler.production.jsonc`; do not deploy the generated
+`dist/server/wrangler.json`, which contains local placeholder bindings.
 
 ## Data attribution
 

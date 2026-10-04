@@ -1,4 +1,4 @@
-// Production analytics is intercepted by the Sites Worker before this route.
+// Production analytics is intercepted by the Cloudflare Worker before this route.
 // Keep local development fail-open so telemetry never disrupts the interface.
 export function POST() {
   return new Response(null, {
