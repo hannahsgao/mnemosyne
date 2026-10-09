@@ -62,14 +62,11 @@ import {
 } from "../lib/search-mode";
 import {
   describeTimelineMetric,
-  formatTimelineYear,
   peakSelection,
   pointForBin,
-  timelineWindow,
 } from "../lib/timeline";
 import type {
   ChartSelection,
-  CorpusMetadata,
   EvidenceArtwork,
   MetricMetadata,
   SearchResponse,
@@ -78,15 +75,12 @@ import type {
 
 const INITIAL_QUERY = "manuscript page, newspaper, comic strip";
 const EXAMPLE_QUERIES = [
-  "mirror, portrait, self-portrait",
   "clock, chair, table, lamp",
   "crown, bonnet, top hat, bowler hat",
   "manuscript page, newspaper, comic strip",
   "crucifixion, public execution",
   "sailing ship, steamship",
   "palace interior, church interior, domestic interior, factory interior",
-  "Last Supper, banquet, tea party, café",
-  "powdered wig, bonnet, crinoline dress, flapper dress",
 ];
 const METADATA_EXAMPLE_QUERIES = [
   "manuscript, printed book, newspaper",
@@ -176,7 +170,7 @@ const SEARCH_INPUT_LABELS: Record<SearchMode, string> = {
 };
 
 const SEARCH_PLACEHOLDERS: Record<SearchMode, string> = {
-  embedding: "mirror, portrait, self-portrait",
+  embedding: INITIAL_QUERY,
   keyword: "carriage, automobile, airplane",
 };
 
@@ -292,22 +286,6 @@ function institutionLabel(value: string) {
     return "Cleveland Museum of Art";
   }
   return value || "Museum source unavailable";
-}
-
-function itemNoun(count: number, countingUnit: CorpusMetadata["countingUnit"]) {
-  if (countingUnit === "catalog-record") {
-    return `catalog record${count === 1 ? "" : "s"}`;
-  }
-  return `work${count === 1 ? "" : "s"}`;
-}
-
-function corpusSummary(corpus: CorpusMetadata) {
-  const label = corpus.label === corpus.id
-    ? "Open-access museum image catalog"
-    : corpus.label;
-  return corpus.count === null
-    ? label
-    : `${corpus.count.toLocaleString()} ${itemNoun(corpus.count, corpus.countingUnit)} · ${label}`;
 }
 
 function ArtworkCard({
@@ -988,14 +966,10 @@ export default function Home() {
   const selectedBin = result?.bins.find((bin) => bin.key === selection?.binKey) ?? null;
   const selectedSeries = result?.series.find((series) => series.queryId === selection?.queryId) ?? null;
   const selectedPoint = selectedSeries && selection ? pointForBin(selectedSeries, selection.binKey) : null;
-  const displayedBins = result?.bins.length ? timelineWindow(result.bins) : [];
   const hasChartPoints = result?.series.some((series) => series.points.length > 0) ?? false;
   const allTermsUnmatched = Boolean(
     result?.series.length && result.series.every((series) => series.k === 0),
   );
-  const yearRange = displayedBins.length
-    ? `${formatTimelineYear(displayedBins[0].start)}–${formatTimelineYear(displayedBins[displayedBins.length - 1].end)}`
-    : "";
   const errorPlacement = searchErrorPlacement(error, result !== null);
   const exampleQueries = searchMode === "embedding" ? EXAMPLE_QUERIES : METADATA_EXAMPLE_QUERIES;
   const resultsTitle = submittedSearchMode === "embedding"
@@ -1158,13 +1132,7 @@ export default function Home() {
                   )}
                 />
               )}
-              {!loading && yearRange && <span>{yearRange}</span>}
             </div>
-            {result && !loading && (
-              <p>
-                {result.queries.length} {result.queries.length === 1 ? "term" : "terms"} · {corpusSummary(result.corpus)}
-              </p>
-            )}
           </div>
 
           {errorPlacement === "empty" && (
@@ -1203,15 +1171,6 @@ export default function Home() {
               }}
               onActivateSeries={activateSeries}
               onToggleSeries={toggleSeries}
-              onHelpOpen={() => trackSearchAnalyticsOnce(
-                `help:chart_reading:${resultSearchId.current ?? "none"}`,
-                "help_open",
-                {
-                  search_mode: submittedSearchMode,
-                  target: "chart_reading",
-                },
-                resultSearchId.current,
-              )}
               onHoverSelection={handleHoverSelection}
               onHoverPreviewError={handleHoverPreviewError}
             />

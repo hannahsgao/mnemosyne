@@ -42,7 +42,6 @@ type TimelineProps = {
   onSelect: (selection: ChartSelection, inputMethod: TimelineInputMethod) => void;
   onActivateSeries: (queryId: string, interaction: TimelineSeriesInteraction) => void;
   onToggleSeries: (queryId: string, inputMethod: TimelineInputMethod) => void;
-  onHelpOpen?: () => void;
   hoverPreview?: TimelineHoverPreview | null;
   onHoverSelection?: (selection: ChartSelection | null) => void;
   onHoverPreviewError?: (preview: TimelineHoverPreview) => void;
@@ -198,7 +197,6 @@ export function Timeline({
   onSelect,
   onActivateSeries,
   onToggleSeries,
-  onHelpOpen,
   hoverPreview = null,
   onHoverSelection,
   onHoverPreviewError,
@@ -832,6 +830,7 @@ export function Timeline({
         preserveAspectRatio="xMidYMid meet"
       >
         <title>{`${label} for ${queries.map((query) => query.label).join(", ")}`}</title>
+        <desc>{description}</desc>
         <defs>
           <clipPath id="timeline-plot-clip">
             <rect x={padLeft} y={padTop} width={chartWidth} height={chartHeight} />
@@ -1104,17 +1103,6 @@ export function Timeline({
           </div>
         </div>
       </div>
-      {description && (
-        <details
-          className="timeline-note"
-          onToggle={(event) => {
-            if (event.currentTarget.open) onHelpOpen?.();
-          }}
-        >
-          <summary>How to read this chart</summary>
-          <p>{description}</p>
-        </details>
-      )}
     </div>
   );
 }
